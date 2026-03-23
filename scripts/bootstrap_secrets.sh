@@ -46,11 +46,13 @@ MANAGED_SECRETS=(
   "COMTRADE_CL_CODE"
   "COMTRADE_WRITE_PARQUET"
   "AWS_DEFAULT_REGION"
+  "COMTRADE_SLACK_WEBHOOK_URL"
 )
 
 SENSITIVE_SECRETS=(
   "AWS_ACCESS_KEY_ID"
   "AWS_SECRET_ACCESS_KEY"
+  "COMTRADE_SLACK_WEBHOOK_URL"
 )
 
 # ── Source .env (safe — only extracts known keys) ─────────────────────────────

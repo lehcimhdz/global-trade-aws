@@ -17,6 +17,7 @@ from typing import Any, Callable, Dict, List, Optional
 from airflow.decorators import task
 from airflow.models import Variable
 
+from comtrade.callbacks import task_failure_callback
 from comtrade.s3_writer import build_s3_key, write_json_to_s3, write_parquet_to_s3
 
 logger = logging.getLogger(__name__)
@@ -44,7 +45,7 @@ def make_extract_task(
 
     api_kwargs_fn is evaluated at runtime so Airflow Variables are resolved lazily.
     """
-    @task(task_id="extract_and_store_raw")
+    @task(task_id="extract_and_store_raw", on_failure_callback=task_failure_callback)
     def extract_and_store_raw(**context) -> str:
         run_id = context["run_id"].replace(":", "-").replace("+", "-")
         logical_date: datetime = context["logical_date"]
@@ -102,7 +103,7 @@ def make_validate_task(
         validate period format.  Set to None to skip period-format check.
     """
 
-    @task(task_id="validate_bronze")
+    @task(task_id="validate_bronze", on_failure_callback=task_failure_callback)
     def validate_bronze(json_key: str, **context) -> str:
         import boto3
 
@@ -155,7 +156,7 @@ def make_parquet_task(
     from S3, converts the 'data' array to Parquet, and uploads it.
     Skipped when COMTRADE_WRITE_PARQUET != 'true'.
     """
-    @task(task_id="convert_to_parquet")
+    @task(task_id="convert_to_parquet", on_failure_callback=task_failure_callback)
     def convert_to_parquet(json_key: str, **context) -> Optional[str]:
         if not _parquet_enabled():
             logger.info("Parquet conversion disabled (COMTRADE_WRITE_PARQUET != true). Skipping.")

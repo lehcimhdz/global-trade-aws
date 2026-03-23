@@ -16,6 +16,7 @@ locals {
   secret_variables = [
     "AWS_ACCESS_KEY_ID",
     "AWS_SECRET_ACCESS_KEY",
+    "COMTRADE_SLACK_WEBHOOK_URL",
   ]
 
   # Non-sensitive pipeline config promoted to Secrets Manager for consistency
