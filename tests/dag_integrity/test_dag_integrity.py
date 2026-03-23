@@ -1,10 +1,10 @@
 """
 DAG integrity tests
 
-Verifies that all 8 Comtrade DAGs:
+Verifies that all 9 Comtrade DAGs (8 ingestion + 1 dbt):
   1. Parse and import without errors
   2. Have the expected dag_id, schedule, tags, and catchup setting
-  3. Contain exactly 3 tasks with the correct task IDs
+  3. Contain exactly the expected tasks with correct task IDs
   4. Have no dependency cycles
 
 These tests use Airflow's DagBag — the same mechanism the scheduler uses to
@@ -30,7 +30,8 @@ DAGS_DIR = Path(__file__).parent.parent.parent / "dags"
 
 # ── Expected DAG metadata ─────────────────────────────────────────────────────
 
-EXPECTED_DAGS: dict[str, dict] = {
+# Ingestion-only DAGs (extract → validate → parquet).
+INGESTION_DAGS: dict[str, dict] = {
     "comtrade_preview": {
         "schedule": "@monthly",
         "tags": {"comtrade", "preview", "s3"},
@@ -77,6 +78,17 @@ EXPECTED_DAGS: dict[str, dict] = {
         "schedule": "@daily",
         "tags": {"comtrade", "releases", "s3"},
         "task_ids": {"extract_and_store_raw", "validate_bronze", "convert_to_parquet"},
+        "catchup": False,
+    },
+}
+
+# All DAGs — ingestion + dbt transformation.
+EXPECTED_DAGS: dict[str, dict] = {
+    **INGESTION_DAGS,
+    "comtrade_dbt": {
+        "schedule": "@monthly",
+        "tags": {"comtrade", "dbt", "silver"},
+        "task_ids": {"dbt_deps", "dbt_run_staging", "dbt_run_silver", "dbt_test"},
         "catchup": False,
     },
 }
@@ -182,28 +194,28 @@ class TestDagTasks:
             f"{dag_id}: expected task IDs {meta['task_ids']}, got {actual_ids}"
         )
 
-    @pytest.mark.parametrize("dag_id", EXPECTED_DAGS)
+    @pytest.mark.parametrize("dag_id", INGESTION_DAGS)
     def test_extract_task_exists(self, dagbag, dag_id):
         dag = dagbag.get_dag(dag_id)
         assert dag.has_task("extract_and_store_raw"), (
             f"{dag_id}: missing task 'extract_and_store_raw'"
         )
 
-    @pytest.mark.parametrize("dag_id", EXPECTED_DAGS)
+    @pytest.mark.parametrize("dag_id", INGESTION_DAGS)
     def test_parquet_task_exists(self, dagbag, dag_id):
         dag = dagbag.get_dag(dag_id)
         assert dag.has_task("convert_to_parquet"), (
             f"{dag_id}: missing task 'convert_to_parquet'"
         )
 
-    @pytest.mark.parametrize("dag_id", EXPECTED_DAGS)
+    @pytest.mark.parametrize("dag_id", INGESTION_DAGS)
     def test_validate_task_exists(self, dagbag, dag_id):
         dag = dagbag.get_dag(dag_id)
         assert dag.has_task("validate_bronze"), (
             f"{dag_id}: missing task 'validate_bronze'"
         )
 
-    @pytest.mark.parametrize("dag_id", EXPECTED_DAGS)
+    @pytest.mark.parametrize("dag_id", INGESTION_DAGS)
     def test_validate_depends_on_extract(self, dagbag, dag_id):
         """validate_bronze must have extract_and_store_raw as upstream."""
         dag = dagbag.get_dag(dag_id)
@@ -213,7 +225,7 @@ class TestDagTasks:
             f"{dag_id}: 'validate_bronze' must depend on 'extract_and_store_raw'"
         )
 
-    @pytest.mark.parametrize("dag_id", EXPECTED_DAGS)
+    @pytest.mark.parametrize("dag_id", INGESTION_DAGS)
     def test_parquet_depends_on_validate(self, dagbag, dag_id):
         """convert_to_parquet must have validate_bronze as upstream."""
         dag = dagbag.get_dag(dag_id)
@@ -246,6 +258,7 @@ class TestDagFiles:
             "comtrade_da_tariffline": "comtrade_da_tariffline.py",
             "comtrade_da": "comtrade_da.py",
             "comtrade_releases": "comtrade_releases.py",
+            "comtrade_dbt": "comtrade_dbt.py",
         }
         for dag_id, filename in dag_id_to_file.items():
             path = DAGS_DIR / filename
@@ -254,3 +267,54 @@ class TestDagFiles:
     def test_plugin_package_has_init(self):
         plugins_init = DAGS_DIR.parent / "plugins" / "comtrade" / "__init__.py"
         assert plugins_init.exists(), f"Plugin __init__.py missing: {plugins_init}"
+
+
+class TestDbtDag:
+    """Structural tests specific to the comtrade_dbt transformation DAG."""
+
+    def test_dbt_dag_is_present(self, dagbag):
+        assert "comtrade_dbt" in dagbag.dags, "comtrade_dbt DAG is missing"
+
+    def test_has_four_tasks(self, dagbag):
+        dag = dagbag.get_dag("comtrade_dbt")
+        assert len(dag.tasks) == 4, (
+            f"Expected 4 dbt tasks, got {len(dag.tasks)}: {[t.task_id for t in dag.tasks]}"
+        )
+
+    def test_dbt_deps_task_exists(self, dagbag):
+        dag = dagbag.get_dag("comtrade_dbt")
+        assert dag.has_task("dbt_deps")
+
+    def test_dbt_run_staging_task_exists(self, dagbag):
+        dag = dagbag.get_dag("comtrade_dbt")
+        assert dag.has_task("dbt_run_staging")
+
+    def test_dbt_run_silver_task_exists(self, dagbag):
+        dag = dagbag.get_dag("comtrade_dbt")
+        assert dag.has_task("dbt_run_silver")
+
+    def test_dbt_test_task_exists(self, dagbag):
+        dag = dagbag.get_dag("comtrade_dbt")
+        assert dag.has_task("dbt_test")
+
+    def test_run_staging_depends_on_deps(self, dagbag):
+        dag = dagbag.get_dag("comtrade_dbt")
+        upstream_ids = {t.task_id for t in dag.get_task("dbt_run_staging").upstream_list}
+        assert "dbt_deps" in upstream_ids
+
+    def test_run_silver_depends_on_staging(self, dagbag):
+        dag = dagbag.get_dag("comtrade_dbt")
+        upstream_ids = {t.task_id for t in dag.get_task("dbt_run_silver").upstream_list}
+        assert "dbt_run_staging" in upstream_ids
+
+    def test_dbt_test_depends_on_silver(self, dagbag):
+        dag = dagbag.get_dag("comtrade_dbt")
+        upstream_ids = {t.task_id for t in dag.get_task("dbt_test").upstream_list}
+        assert "dbt_run_silver" in upstream_ids
+
+    def test_no_cycles(self, dagbag):
+        dag = dagbag.get_dag("comtrade_dbt")
+        try:
+            dag.topological_sort()
+        except Exception as exc:
+            pytest.fail(f"comtrade_dbt: topological sort failed (cycle?): {exc}")

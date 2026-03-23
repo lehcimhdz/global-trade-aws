@@ -155,26 +155,41 @@ dbt run --full-refresh
 
 ## Airflow integration
 
-Run dbt after all Comtrade DAGs have ingested data for the target period.  The simplest approach is a dedicated DAG using the `BashOperator`:
+The `comtrade_dbt` DAG (`dags/comtrade_dbt.py`) orchestrates the full dbt run from Airflow.
 
-```python
-from airflow.operators.bash import BashOperator
+### Task order
 
-dbt_run = BashOperator(
-    task_id="dbt_run_silver",
-    bash_command=(
-        "cd /opt/airflow/dbt && "
-        "dbt deps && dbt run --target prod"
-    ),
-    env={
-        "AWS_DEFAULT_REGION": "{{ var.value.AWS_DEFAULT_REGION }}",
-        "COMTRADE_S3_BUCKET":  "{{ var.value.COMTRADE_S3_BUCKET }}",
-        # Credentials are injected via the MWAA execution role in production.
-    },
-)
+```
+dbt_deps → dbt_run_staging → dbt_run_silver → dbt_test
 ```
 
-In MWAA, mount the `dbt/` directory into the environment by uploading it as part of the artifacts sync step in `.github/workflows/deploy.yml`.
+| Task | Command | Purpose |
+|------|---------|---------|
+| `dbt_deps` | `dbt deps` | Install / refresh dbt packages (`dbt_utils`) |
+| `dbt_run_staging` | `dbt run --select staging` | Materialise staging views against bronze Iceberg tables |
+| `dbt_run_silver` | `dbt run --select silver` | Materialise silver Iceberg tables via Athena |
+| `dbt_test` | `dbt test` | Run all schema + custom singular tests |
+
+### Schedule
+
+`@monthly` — runs at the start of each month, after the ingestion DAGs have had their window to populate the bronze tables.
+
+### Configuration
+
+All AWS credentials and bucket names are injected via Jinja-templated env vars (`{{ var.value.X }}`), so `Variable.get()` is **never** called at parse time.
+
+| Variable | Default | Purpose |
+|----------|---------|---------|
+| `COMTRADE_DBT_DIR` | `/opt/airflow/dbt` | Path to the dbt project on the worker |
+| `COMTRADE_DBT_TARGET` | `prod` | dbt target profile to use |
+| `COMTRADE_S3_BUCKET` | — | S3 bucket (forwarded to dbt) |
+| `AWS_DEFAULT_REGION` | `us-east-1` | AWS region |
+| `AWS_ACCESS_KEY_ID` | `""` | Credentials — omit when using IAM role |
+| `AWS_SECRET_ACCESS_KEY` | `""` | Credentials — omit when using IAM role |
+
+### MWAA deployment
+
+In MWAA, include the `dbt/` directory in the artifacts sync step in `.github/workflows/deploy.yml` and set the `COMTRADE_DBT_DIR` Variable to the mounted path.
 
 ---
 

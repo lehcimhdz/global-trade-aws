@@ -143,3 +143,46 @@ import-vars: ## Import Airflow Variables from config/airflow_variables.json
 .PHONY: trigger
 trigger: ## Trigger a DAG run — usage: make trigger DAG=comtrade_preview
 	docker compose exec airflow-webserver airflow dags trigger $(DAG)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# dbt
+# ─────────────────────────────────────────────────────────────────────────────
+
+DBT_DIR     ?= dbt
+DBT_TARGET  ?= dev
+
+.PHONY: dbt-install
+dbt-install: ## Install dbt and its Athena adapter
+	pip install -r $(DBT_DIR)/requirements.txt
+
+.PHONY: dbt-deps
+dbt-deps: ## Install dbt packages (dbt_utils, etc.)
+	cd $(DBT_DIR) && dbt deps
+
+.PHONY: dbt-compile
+dbt-compile: ## Compile dbt models without running them
+	cd $(DBT_DIR) && dbt compile --target $(DBT_TARGET)
+
+.PHONY: dbt-run
+dbt-run: ## Run all dbt models (staging + silver)
+	cd $(DBT_DIR) && dbt run --target $(DBT_TARGET)
+
+.PHONY: dbt-run-staging
+dbt-run-staging: ## Run only staging views
+	cd $(DBT_DIR) && dbt run --select staging --target $(DBT_TARGET)
+
+.PHONY: dbt-run-silver
+dbt-run-silver: ## Run only silver Iceberg tables
+	cd $(DBT_DIR) && dbt run --select silver --target $(DBT_TARGET)
+
+.PHONY: dbt-test
+dbt-test: ## Run all dbt schema + custom tests
+	cd $(DBT_DIR) && dbt test --target $(DBT_TARGET)
+
+.PHONY: dbt-full
+dbt-full: dbt-deps dbt-run dbt-test ## Full dbt pipeline: deps → run → test
+	@echo "$(GREEN)dbt silver layer complete.$(RESET)"
+
+.PHONY: dbt-clean
+dbt-clean: ## Remove dbt compiled artefacts
+	cd $(DBT_DIR) && dbt clean

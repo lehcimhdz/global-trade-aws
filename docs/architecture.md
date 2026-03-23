@@ -93,7 +93,7 @@ After each task, cross-cutting side effects fire automatically (never masking ta
 - **CloudWatch metrics** — emitted by `validate_bronze` (row count, check pass/fail, bytes written).
 - **OpenLineage events** — emitted by every task to Marquez when `OPENLINEAGE_URL` is configured.
 
-A separate **dbt** project (`dbt/`) transforms the Iceberg bronze tables into queryable silver tables via Amazon Athena.  It runs independently of the Airflow pipeline (scheduled separately or triggered manually).
+The **`comtrade_dbt`** DAG orchestrates a four-task dbt run (`dbt_deps → dbt_run_staging → dbt_run_silver → dbt_test`) that transforms the Iceberg bronze tables into queryable silver tables via Amazon Athena.  It is scheduled monthly, after the ingestion window.
 
 ---
 

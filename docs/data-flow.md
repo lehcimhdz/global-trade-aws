@@ -78,7 +78,7 @@ Airflow Scheduler
 
 ### Transformation (dbt)
 
-After the Airflow pipeline has populated the Iceberg tables, dbt transforms them into silver tables via Amazon Athena:
+After the Airflow pipeline has populated the Iceberg tables, the `comtrade_dbt` DAG transforms them into silver tables via Amazon Athena:
 
 ```
 Iceberg bronze (Glue: comtrade.preview, comtrade.getmbs, …)
@@ -93,7 +93,9 @@ Iceberg bronze (Glue: comtrade.preview, comtrade.getmbs, …)
     └── reporter_summary     — per-country export / import / balance totals
 ```
 
-See [docs/dbt.md](dbt.md) for the full dbt project reference.
+The `comtrade_dbt` DAG runs `dbt_deps → dbt_run_staging → dbt_run_silver → dbt_test` sequentially with `on_failure_callback` on every task.
+
+See [docs/dbt.md](dbt.md) for the full dbt project and DAG reference.
 
 ---
 
