@@ -35,6 +35,11 @@ output "secrets_manager_paths" {
   description = "Map of variable name → Secrets Manager path for all managed Airflow Variables"
 }
 
+output "cloudwatch_dashboard_url" {
+  value       = "https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#dashboards:name=${aws_cloudwatch_dashboard.comtrade_pipeline.dashboard_name}"
+  description = "Direct link to the Comtrade Pipeline CloudWatch dashboard"
+}
+
 output "next_steps" {
   value = <<-EOT
     Infrastructure created. Next steps:

@@ -39,6 +39,18 @@ resource "aws_iam_policy" "airflow_data_lake" {
           for s in aws_secretsmanager_secret.airflow_variable : s.arn
         ]
       },
+      {
+        # cloudwatch:PutMetricData does not support resource-level restrictions.
+        Sid      = "EmitCloudWatchMetrics"
+        Effect   = "Allow"
+        Action   = ["cloudwatch:PutMetricData"]
+        Resource = ["*"]
+        Condition = {
+          StringEquals = {
+            "cloudwatch:namespace" = "Comtrade/Pipeline"
+          }
+        }
+      },
     ]
   })
 }
