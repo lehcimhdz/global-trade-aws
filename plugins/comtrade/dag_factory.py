@@ -18,6 +18,7 @@ from airflow.decorators import task
 from airflow.models import Variable
 
 from comtrade.callbacks import task_failure_callback
+from comtrade.metrics import emit_validation_metrics
 from comtrade.s3_writer import build_s3_key, write_json_to_s3, write_parquet_to_s3
 
 logger = logging.getLogger(__name__)
@@ -140,6 +141,27 @@ def make_validate_task(
         logger.info(
             "Quality gate passed for %s — %d/%d checks OK", endpoint, passed, len(results)
         )
+
+        # Emit CloudWatch metrics — must not raise.
+        json_bytes: Optional[int] = None
+        try:
+            head = boto3.client(
+                "s3",
+                aws_access_key_id=Variable.get("AWS_ACCESS_KEY_ID", default_var=None),
+                aws_secret_access_key=Variable.get("AWS_SECRET_ACCESS_KEY", default_var=None),
+                region_name=Variable.get("AWS_DEFAULT_REGION", default_var="us-east-1"),
+            ).head_object(Bucket=bucket, Key=json_key)
+            json_bytes = head.get("ContentLength")
+        except Exception as exc:
+            logger.warning("Could not retrieve S3 object size for metrics: %s", exc)
+
+        emit_validation_metrics(
+            dag_id=context["dag"].dag_id,
+            endpoint=endpoint,
+            results=results,
+            json_bytes=json_bytes,
+        )
+
         return json_key  # pass-through: parquet task uses this key
 
     return validate_bronze
