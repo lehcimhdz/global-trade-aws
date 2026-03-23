@@ -1,0 +1,244 @@
+name: Deploy
+
+# ── Triggers ──────────────────────────────────────────────────────────────────
+# Automatic: every merge to main (after CI passes).
+# Manual:    workflow_dispatch lets you redeploy any environment on demand.
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      target_env:
+        description: "Highest environment to deploy to"
+        required: true
+        default: dev
+        type: choice
+        options: [dev, staging, prod]
+
+concurrency:
+  group: deploy-${{ github.ref }}
+  cancel-in-progress: false   # never cancel an in-flight deploy
+
+# ── Permissions ───────────────────────────────────────────────────────────────
+# Uses GitHub OIDC to obtain short-lived AWS credentials — no stored secrets.
+permissions:
+  id-token: write   # required for OIDC token exchange
+  contents: read
+
+# ── Shared env ────────────────────────────────────────────────────────────────
+env:
+  AWS_REGION: us-east-1
+  AIRFLOW_VERSION: "2.9.3"
+  TF_VERSION: "1.7.5"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 1 — Build and push Docker image to ECR
+# ─────────────────────────────────────────────────────────────────────────────
+jobs:
+  build-push:
+    name: Build & Push Image
+    runs-on: ubuntu-latest
+    outputs:
+      image_tag: ${{ steps.tag.outputs.sha_tag }}
+      ecr_registry: ${{ steps.login-ecr.outputs.registry }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Log in to ECR
+        id: login-ecr
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Compute image tag
+        id: tag
+        run: echo "sha_tag=sha-${{ github.sha }}" >> "$GITHUB_OUTPUT"
+
+      - name: Build and push
+        env:
+          IMAGE: ${{ steps.login-ecr.outputs.registry }}/${{ secrets.ECR_REPO_NAME }}:${{ steps.tag.outputs.sha_tag }}
+        run: |
+          docker build --tag "$IMAGE" .
+          docker push "$IMAGE"
+          echo "Pushed: $IMAGE"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 2 — Deploy to dev (automatic)
+# ─────────────────────────────────────────────────────────────────────────────
+  deploy-dev:
+    name: Deploy → dev
+    needs: build-push
+    runs-on: ubuntu-latest
+    environment: dev   # no protection rules — deploys immediately
+
+    env:
+      TF_VAR_environment: dev
+      TF_VAR_enable_mwaa: "false"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        run: |
+          terraform -chdir=terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=global-trade-aws/dev/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: Terraform apply
+        run: terraform -chdir=terraform apply -auto-approve
+
+      - name: Upload MWAA artifacts (skipped in dev — MWAA disabled)
+        run: echo "MWAA disabled in dev — skipping artifact sync."
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 3 — Deploy to staging (requires manual approval)
+# ─────────────────────────────────────────────────────────────────────────────
+  deploy-staging:
+    name: Deploy → staging
+    needs: deploy-dev
+    runs-on: ubuntu-latest
+    # Gate: GitHub Environment "staging" must have at least one required reviewer.
+    # Configure at: Settings → Environments → staging → Required reviewers
+    environment: staging
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      (github.event.inputs.target_env == 'staging' || github.event.inputs.target_env == 'prod') ||
+      github.event_name == 'push'
+
+    env:
+      TF_VAR_environment: staging
+      TF_VAR_enable_mwaa: "true"
+      TF_VAR_mwaa_environment_class: mw1.small
+      TF_VAR_mwaa_min_workers: "1"
+      TF_VAR_mwaa_max_workers: "3"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        run: |
+          terraform -chdir=terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=global-trade-aws/staging/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: Terraform apply
+        run: terraform -chdir=terraform apply -auto-approve
+
+      - name: Sync MWAA artifacts to S3
+        run: |
+          BUCKET=$(terraform -chdir=terraform output -raw mwaa_artifacts_bucket)
+
+          # DAGs
+          aws s3 sync dags/ "s3://${BUCKET}/dags/" --delete
+
+          # Plugins (zipped — MWAA requirement)
+          zip -r plugins.zip plugins/
+          aws s3 cp plugins.zip "s3://${BUCKET}/plugins.zip"
+
+          # Requirements
+          aws s3 cp requirements.txt "s3://${BUCKET}/requirements.txt"
+
+          echo "Artifacts synced to s3://${BUCKET}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Job 4 — Deploy to prod (requires manual approval, runs after staging)
+# ─────────────────────────────────────────────────────────────────────────────
+  deploy-prod:
+    name: Deploy → prod
+    needs: deploy-staging
+    runs-on: ubuntu-latest
+    # Gate: GitHub Environment "prod" must have required reviewers + a wait timer.
+    # Configure at: Settings → Environments → prod → Required reviewers
+    environment: prod
+    if: >
+      github.event_name == 'workflow_dispatch' &&
+      github.event.inputs.target_env == 'prod' ||
+      github.event_name == 'push'
+
+    env:
+      TF_VAR_environment: prod
+      TF_VAR_enable_mwaa: "true"
+      TF_VAR_mwaa_environment_class: mw1.medium
+      TF_VAR_mwaa_min_workers: "2"
+      TF_VAR_mwaa_max_workers: "10"
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: ${{ env.TF_VERSION }}
+
+      - name: Configure AWS credentials (OIDC)
+        uses: aws-actions/configure-aws-credentials@v4
+        with:
+          role-to-assume: ${{ secrets.AWS_DEPLOY_ROLE_ARN }}
+          aws-region: ${{ env.AWS_REGION }}
+
+      - name: Terraform init
+        run: |
+          terraform -chdir=terraform init \
+            -backend-config="bucket=${{ secrets.TF_STATE_BUCKET }}" \
+            -backend-config="key=global-trade-aws/prod/terraform.tfstate" \
+            -backend-config="region=${{ env.AWS_REGION }}"
+
+      - name: Terraform apply
+        run: terraform -chdir=terraform apply -auto-approve
+
+      - name: Sync MWAA artifacts to S3
+        run: |
+          BUCKET=$(terraform -chdir=terraform output -raw mwaa_artifacts_bucket)
+
+          aws s3 sync dags/ "s3://${BUCKET}/dags/" --delete
+
+          zip -r plugins.zip plugins/
+          aws s3 cp plugins.zip "s3://${BUCKET}/plugins.zip"
+
+          aws s3 cp requirements.txt "s3://${BUCKET}/requirements.txt"
+
+          echo "Artifacts synced to s3://${BUCKET}"
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Status gate — single check for branch protection
+# ─────────────────────────────────────────────────────────────────────────────
+  deploy-pass:
+    name: Deploy Pass
+    runs-on: ubuntu-latest
+    needs: [build-push, deploy-dev]
+    if: always()
+    steps:
+      - name: Check required jobs passed
+        run: |
+          if [[ "${{ needs.build-push.result }}" != "success" || \
+                "${{ needs.deploy-dev.result }}"  != "success" ]]; then
+            echo "Build or dev deploy failed."
+            exit 1
+          fi
+          echo "Build and dev deploy succeeded."

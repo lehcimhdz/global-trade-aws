@@ -319,6 +319,100 @@ All Variables are read at task runtime (not parse time), so changes take effect 
 
 ---
 
+---
+
+## Production deployment (AWS MWAA)
+
+### How it works
+
+In `dev`, Docker Compose is the runtime. In `staging` and `prod`, AWS MWAA
+(Managed Airflow) replaces it. The `deploy.yml` workflow handles the full
+promotion pipeline:
+
+```
+main branch merge
+    │
+    ▼
+build-push ──► ECR image (sha-<git-sha>)
+    │
+    ▼
+deploy-dev  ──► terraform apply (enable_mwaa=false) — automatic
+    │
+    ▼ (manual approval via GitHub Environment "staging")
+deploy-staging ──► terraform apply (enable_mwaa=true) + S3 artifact sync
+    │
+    ▼ (manual approval via GitHub Environment "prod")
+deploy-prod ──► terraform apply (mw1.medium, max 10 workers) + S3 artifact sync
+```
+
+### First-time setup
+
+**1. Create an OIDC role in AWS** so GitHub Actions can assume it without stored credentials:
+
+```bash
+# In AWS Console → IAM → Identity providers → Add provider
+# Provider URL: https://token.actions.githubusercontent.com
+# Audience: sts.amazonaws.com
+# Then create a role that trusts this provider for your repo.
+```
+
+**2. Add GitHub repository secrets:**
+
+| Secret | Value |
+|--------|-------|
+| `AWS_DEPLOY_ROLE_ARN` | ARN of the OIDC IAM role |
+| `ECR_REPO_NAME` | `global-trade-<env>-airflow` |
+| `TF_STATE_BUCKET` | S3 bucket for Terraform remote state |
+
+**3. Configure GitHub Environments** (`Settings → Environments`):
+
+| Environment | Protection |
+|-------------|-----------|
+| `dev` | None — deploys automatically |
+| `staging` | Required reviewers (1+) |
+| `prod` | Required reviewers (1+) + wait timer |
+
+**4. Enable the Terraform S3 backend** by uncommenting the `backend "s3"` block in `terraform/main.tf`.
+
+### MWAA environment classes
+
+| Class | vCPU | Memory | Recommended for |
+|-------|------|--------|----------------|
+| `mw1.small` | 2 | 4 GB | staging (low volume) |
+| `mw1.medium` | 4 | 8 GB | prod (≤ 8 DAGs, monthly schedule) |
+| `mw1.large` | 8 | 16 GB | prod (high-frequency or many DAGs) |
+
+### Updating DAGs in MWAA
+
+The `deploy-staging` and `deploy-prod` jobs automatically sync `dags/`, zip `plugins/`, and upload `requirements.txt` to the MWAA artifacts bucket on every approved deploy.
+
+To manually sync without a full Terraform apply:
+
+```bash
+BUCKET=$(terraform -chdir=terraform output -raw mwaa_artifacts_bucket)
+aws s3 sync dags/ "s3://${BUCKET}/dags/" --delete
+zip -r plugins.zip plugins/ && aws s3 cp plugins.zip "s3://${BUCKET}/plugins.zip"
+aws s3 cp requirements.txt "s3://${BUCKET}/requirements.txt"
+```
+
+### Docker image (ECR)
+
+Every merge to `main` builds `Dockerfile` and pushes a tagged image to ECR:
+
+```
+<account>.dkr.ecr.<region>.amazonaws.com/global-trade-<env>-airflow:sha-<git-sha>
+```
+
+Pull it locally for debugging:
+
+```bash
+aws ecr get-login-password --region us-east-1 | \
+  docker login --username AWS --password-stdin <ecr-url>
+docker pull <ecr-url>:sha-<git-sha>
+```
+
+---
+
 ## IAM policy (minimum required)
 
 ```json

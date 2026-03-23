@@ -36,3 +36,33 @@ variable "secrets_recovery_window_days" {
   description = "Days to retain a deleted secret before permanent deletion (0 = immediate in non-prod)"
   default     = 0
 }
+
+# ── MWAA ──────────────────────────────────────────────────────────────────────
+
+variable "enable_mwaa" {
+  type        = bool
+  description = "Deploy AWS MWAA (Managed Airflow). Set to false in dev (use Docker Compose instead)."
+  default     = false
+}
+
+variable "mwaa_environment_class" {
+  type        = string
+  description = "MWAA environment class (mw1.small / mw1.medium / mw1.large)"
+  default     = "mw1.small"
+  validation {
+    condition     = contains(["mw1.small", "mw1.medium", "mw1.large"], var.mwaa_environment_class)
+    error_message = "mwaa_environment_class must be mw1.small, mw1.medium, or mw1.large"
+  }
+}
+
+variable "mwaa_min_workers" {
+  type        = number
+  description = "Minimum number of MWAA workers"
+  default     = 1
+}
+
+variable "mwaa_max_workers" {
+  type        = number
+  description = "Maximum number of MWAA workers"
+  default     = 2
+}

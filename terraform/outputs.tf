@@ -35,6 +35,21 @@ output "secrets_manager_paths" {
   description = "Map of variable name → Secrets Manager path for all managed Airflow Variables"
 }
 
+output "ecr_repository_url" {
+  value       = aws_ecr_repository.airflow.repository_url
+  description = "ECR repository URL — use as base image in Dockerfile and for docker push"
+}
+
+output "mwaa_webserver_url" {
+  value       = var.enable_mwaa ? aws_mwaa_environment.main[0].webserver_url : null
+  description = "MWAA Airflow UI URL (null when enable_mwaa = false)"
+}
+
+output "mwaa_artifacts_bucket" {
+  value       = var.enable_mwaa ? aws_s3_bucket.mwaa_artifacts[0].id : null
+  description = "S3 bucket holding DAGs, plugins.zip, and requirements.txt for MWAA"
+}
+
 output "cloudwatch_dashboard_url" {
   value       = "https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#dashboards:name=${aws_cloudwatch_dashboard.comtrade_pipeline.dashboard_name}"
   description = "Direct link to the Comtrade Pipeline CloudWatch dashboard"
