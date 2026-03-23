@@ -35,7 +35,9 @@ Airflow Scheduler
       │          │       • check_period_format   — period matches freq code (A/M)
       │          │       • check_no_duplicates   — no repeated natural keys (WARNING)
       │          │  4. Log all results; raise DataQualityError on any ERROR failure
-      │          │  5. Return same S3 key → XCom (pass-through)
+      │          │  5. Emit CloudWatch metrics (RowCount, ChecksPassed, ChecksFailed, JsonBytesWritten)
+      │          │  6. Emit OpenLineage COMPLETE event → Marquez
+      │          │  7. Return same S3 key → XCom (pass-through)
       │          ▼
       │    (no new S3 object — validates the bronze JSON in place)
       │
@@ -47,6 +49,7 @@ Airflow Scheduler
                  │  4. pd.json_normalize(records) → DataFrame
                  │  5. df.to_parquet(engine="pyarrow") → BytesIO
                  │  6. PUT to S3 (Content-Type: application/octet-stream)
+                 │  7. Emit OpenLineage COMPLETE event → Marquez
                  ▼
            S3: comtrade/<endpoint>/type=X/freq=Y/year=YYYY/month=MM/fmt=parquet/<run_id>.parquet
 ```
@@ -141,8 +144,10 @@ The `json_key` argument in each downstream task is automatically resolved from X
 | Data quality (WARNING) | Logged, pipeline continues | Duplicates, negative values |
 | Empty data | Log warning, return `None` | Parquet task only |
 | HTTP 4xx (non-429) | Raised immediately | No retry (client error) |
-| Task failure | `on_failure_callback` | Slack notification on every task |
+| Task failure | `on_failure_callback` | Slack notification + dead-letter JSON to S3 |
 | SLA miss | `sla_miss_callback` | Slack notification when DAG exceeds SLA window |
+| Observability | CloudWatch metrics | Emitted by `validate_bronze` — RowCount, ChecksPassed/Failed, Bytes |
+| Lineage | OpenLineage → Marquez | Emitted after each task when `OPENLINEAGE_URL` is set |
 
 ---
 

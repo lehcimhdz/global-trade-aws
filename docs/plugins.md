@@ -14,7 +14,9 @@ plugins/
     ├── s3_writer.py      — S3 upload utilities
     ├── dag_factory.py    — @task factory functions shared by all DAGs
     ├── validator.py      — Pure-Python data quality checks (no Airflow dependency)
-    └── callbacks.py      — Slack failure and SLA miss notifications
+    ├── callbacks.py      — Slack failure notifications, SLA miss alerts, dead-letter S3 manifest
+    ├── metrics.py        — CloudWatch custom metric emission (RowCount, ChecksPassed, …)
+    └── lineage.py        — OpenLineage event emission to Marquez
 ```
 
 ---
@@ -294,28 +296,98 @@ class CheckResult:
 
 ### Purpose
 
-Sends Slack notifications on task failure and SLA misses. Uses only Python stdlib (`urllib.request`) — no extra dependencies. All Airflow imports are lazy so the module can be imported and tested without Airflow.
+Three responsibilities, all using Python stdlib only (`urllib.request`, `json`) — no extra dependencies. All Airflow imports are lazy.
 
 ### `task_failure_callback(context)`
 
-Airflow `on_failure_callback`. Automatically attached to every task via the `@task` decorator in `dag_factory.py`. Posts a Slack Block Kit message with the DAG ID, task ID, run ID, execution date, exception snippet, and a direct link to the task log.
+Airflow `on_failure_callback`. Attached to every task via `dag_factory.py`. Does two things in order:
+
+1. **Dead-letter manifest** — writes a structured JSON file to `s3://<bucket>/comtrade/errors/dag_id=.../task_id=.../year=.../month=.../` for every failure, regardless of Slack configuration. Queryable with Athena.
+2. **Slack alert** — posts a Block Kit message with DAG ID, task ID, run ID, execution date, exception snippet, and a log link.
 
 ### `sla_miss_callback(dag, task_list, blocking_task_list, slas, blocking_tis)`
 
-Airflow `sla_miss_callback`. Set on each DAG definition. Posts a Slack message listing the missed tasks, blocking tasks, and execution dates.
+Airflow `sla_miss_callback`. Set on each DAG. Posts a Slack message listing missed tasks, blocking tasks, and execution dates.
 
 ### Resilience
 
-Both callbacks follow the same pattern:
-- If `COMTRADE_SLACK_WEBHOOK_URL` is not set, a warning is logged and the function returns silently (local dev works without a Slack workspace).
-- Any exception during the HTTP POST is caught and logged — notification failures never mask the original task failure.
+- If `COMTRADE_SLACK_WEBHOOK_URL` is not set, a warning is logged and the function returns silently.
+- The dead-letter write always runs first, independently of Slack.
+- Any exception is caught and logged — notification failures never mask the original task failure.
 
 ### Configuration
-
-Set `COMTRADE_SLACK_WEBHOOK_URL` in `.env` (populated to AWS Secrets Manager via `make bootstrap-secrets`):
 
 ```dotenv
 COMTRADE_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
 ```
 
 Create a webhook at <https://api.slack.com/messaging/webhooks>.
+
+---
+
+## `metrics.py`
+
+### Purpose
+
+Emits four CloudWatch custom metrics under the `Comtrade/Pipeline` namespace after every `validate_bronze` run. All boto3 imports are lazy; errors are caught and logged without propagating.
+
+### Metrics
+
+| Metric | Unit | Description |
+|--------|------|-------------|
+| `RowCount` | Count | Records returned by the API |
+| `ChecksPassed` | Count | Quality checks that passed |
+| `ChecksFailed` | Count | Quality checks that failed (any severity) |
+| `JsonBytesWritten` | Bytes | Size of the S3 bronze JSON object |
+
+All metrics carry two dimensions: **DagId** and **Endpoint**.
+
+### `emit_validation_metrics(dag_id, endpoint, results, json_bytes)`
+
+Called automatically from `make_validate_task()`. Builds the metric payload from `CheckResult` objects and calls `cloudwatch.put_metric_data`.
+
+---
+
+## `lineage.py`
+
+### Purpose
+
+Emits [OpenLineage](https://openlineage.io) `RunEvent` JSON to a Marquez-compatible HTTP endpoint. Uses Python stdlib (`urllib.request`) — no `openlineage-python` package required. All Airflow imports are lazy.
+
+### Lineage graph
+
+```
+comtradeapi.un.org/public/v1/<endpoint>
+    │
+    │  [extract_and_store_raw]
+    ▼
+s3://<bucket>/comtrade/<endpoint>/…/<run_id>.json   (bronze)
+    │
+    ├──[validate_bronze]──►  (quality gate, no new dataset)
+    │
+    └──[convert_to_parquet]
+         │
+         ▼
+       s3://<bucket>/comtrade/<endpoint>/…/fmt=parquet/<run_id>.parquet   (silver)
+```
+
+### Dataset naming convention
+
+| URI type | Namespace | Name |
+|----------|-----------|------|
+| `s3://bucket/key` | `s3://bucket` | `key` |
+| `https://host/path` | `https://host` | `/path` |
+
+### `emit_task_complete(dag_id, task_id, run_id, input_uris, output_uris)`
+
+Called automatically from `dag_factory.py` after each task succeeds. Posts a `COMPLETE` event to `<OPENLINEAGE_URL>/api/v1/lineage`. If `OPENLINEAGE_URL` is not set the call is silently skipped.
+
+### Configuration
+
+Add to `.env`:
+
+```dotenv
+OPENLINEAGE_URL=http://marquez:5000
+```
+
+Or start the bundled Marquez stack (see [Operations — Data lineage](operations.md#data-lineage-marquez)).

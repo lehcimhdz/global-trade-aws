@@ -18,6 +18,7 @@ from airflow.decorators import task
 from airflow.models import Variable
 
 from comtrade.callbacks import task_failure_callback
+from comtrade.lineage import emit_task_complete
 from comtrade.metrics import emit_validation_metrics
 from comtrade.s3_writer import build_s3_key, write_json_to_s3, write_parquet_to_s3
 
@@ -65,7 +66,17 @@ def make_extract_task(
             extra_partitions=extra_partitions,
             fmt="json",
         )
-        write_json_to_s3(data, _bucket(), key)
+        bucket = _bucket()
+        write_json_to_s3(data, bucket, key)
+
+        # Emit data lineage: API source → S3 bronze object.
+        emit_task_complete(
+            dag_id=context["dag"].dag_id,
+            task_id="extract_and_store_raw",
+            run_id=run_id,
+            input_uris=[f"https://comtradeapi.un.org/public/v1/{endpoint}"],
+            output_uris=[f"s3://{bucket}/{key}"],
+        )
         return key
 
     return extract_and_store_raw
@@ -162,6 +173,15 @@ def make_validate_task(
             json_bytes=json_bytes,
         )
 
+        # Emit data lineage: bronze JSON consumed and quality-gated.
+        emit_task_complete(
+            dag_id=context["dag"].dag_id,
+            task_id="validate_bronze",
+            run_id=context["run_id"],
+            input_uris=[f"s3://{bucket}/{json_key}"],
+            output_uris=[],
+        )
+
         return json_key  # pass-through: parquet task uses this key
 
     return validate_bronze
@@ -215,6 +235,16 @@ def make_parquet_task(
             extra_partitions=extra_partitions,
             fmt="parquet",
         )
-        return write_parquet_to_s3(records, bucket, parquet_key)
+        parquet_uri = write_parquet_to_s3(records, bucket, parquet_key)
+
+        # Emit data lineage: bronze JSON → Parquet silver object.
+        emit_task_complete(
+            dag_id=context["dag"].dag_id,
+            task_id="convert_to_parquet",
+            run_id=run_id,
+            input_uris=[f"s3://{bucket}/{json_key}"],
+            output_uris=[parquet_uri] if parquet_uri else [],
+        )
+        return parquet_uri
 
     return convert_to_parquet

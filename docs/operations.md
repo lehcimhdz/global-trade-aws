@@ -182,6 +182,43 @@ The same `COMTRADE_SLACK_WEBHOOK_URL` variable is used for SLA alerts.
 | Task log | Click any task cell → Log | Full stdout/stderr |
 | Variables | `/variable/list/` | Inspect and edit runtime config |
 
+### CloudWatch dashboard
+
+After Terraform is applied, the `cloudwatch_dashboard_url` output gives a direct link to the ops-facing dashboard. It shows:
+
+| Widget | What it tracks |
+|--------|----------------|
+| Row Count per DAG Run | Data volume over time |
+| Quality Gate — Checks Passed vs Failed | DAG health |
+| Check Failure Rate (%) | API error rate |
+| JSON Bytes Written to S3 | Raw data volume |
+
+Metrics are emitted automatically by `validate_bronze` via `metrics.py`. The IAM policy already grants `cloudwatch:PutMetricData` scoped to the `Comtrade/Pipeline` namespace.
+
+### Data lineage (Marquez)
+
+Start the optional Marquez stack alongside Airflow:
+
+```bash
+docker compose --profile lineage up -d
+```
+
+| UI | URL |
+|----|-----|
+| Marquez API | `http://localhost:5000` |
+| Marquez Web UI | `http://localhost:3000` |
+
+Then set the Airflow Variable so workers know where to send events:
+
+```bash
+docker compose exec airflow-webserver \
+  airflow variables set OPENLINEAGE_URL http://marquez:5000
+```
+
+Once events arrive you can browse the lineage graph at `http://localhost:3000` — select the `comtrade` namespace to see dataset dependencies across all DAGs.
+
+If `OPENLINEAGE_URL` is not set, lineage emission is silently skipped — Airflow and the rest of the pipeline work normally.
+
 ### Celery Flower (optional)
 
 Enable the Flower service to monitor worker queues and task throughput:

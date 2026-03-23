@@ -65,6 +65,10 @@ Shared Python library mounted into every Airflow container via the `plugins/` vo
 | `client.py` | HTTP calls to the Comtrade API, retry logic, rate limiting |
 | `s3_writer.py` | S3 upload (JSON and Parquet), S3 key construction |
 | `dag_factory.py` | `@task` factory functions shared across all DAGs |
+| `validator.py` | Pure-Python data quality checks (7-check suite) |
+| `callbacks.py` | Slack alerts, SLA miss notifications, dead-letter S3 manifests |
+| `metrics.py` | CloudWatch custom metric emission after each validation run |
+| `lineage.py` | OpenLineage event emission to Marquez after each task |
 
 ### DAG files (`dags/`)
 Thin orchestration files — one per API endpoint. They declare schedules, read Airflow Variables, and wire tasks produced by the factory.
@@ -73,14 +77,18 @@ Thin orchestration files — one per API endpoint. They declare schedules, read 
 
 ## Execution model
 
-Each DAG run produces **two sequential tasks**:
+Each DAG run produces **three sequential tasks**:
 
 ```
-extract_and_store_raw  ──►  convert_to_parquet
-       (always)                (conditional)
+extract_and_store_raw  ──►  validate_bronze  ──►  convert_to_parquet
+       (always)                (always)              (conditional)
 ```
 
-The second task is a no-op when the `COMTRADE_WRITE_PARQUET` Variable is not set to `"true"`.
+`convert_to_parquet` is a no-op when `COMTRADE_WRITE_PARQUET` is not `"true"`.
+
+After each task, two cross-cutting side effects fire automatically (never masking task failures):
+- **CloudWatch metrics** — emitted by `validate_bronze` (row count, check pass/fail, bytes written).
+- **OpenLineage events** — emitted by every task to Marquez when `OPENLINEAGE_URL` is configured.
 
 ---
 
@@ -121,3 +129,5 @@ The second task is a no-op when the `COMTRADE_WRITE_PARQUET` Variable is not set
 | Cloud storage | boto3 / AWS S3 | 1.34.144 |
 | Columnar format | pandas + pyarrow | 2.2.2 / 16.1.0 |
 | Base image | apache/airflow:2.9.3-python3.11 | — |
+| Observability — metrics | AWS CloudWatch | — |
+| Observability — lineage | Marquez (OpenLineage) | 0.50.0 |

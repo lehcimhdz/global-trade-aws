@@ -170,6 +170,61 @@ services:
       - -c
       - airflow
 
+  # ── Optional: Marquez data lineage (profile: lineage) ─────────────────────
+  # Start with: docker compose --profile lineage up -d
+  # Marquez UI: http://localhost:3000   API: http://localhost:5000
+
+  marquez-db:
+    image: postgres:15
+    profiles: ["lineage"]
+    environment:
+      POSTGRES_USER: marquez
+      POSTGRES_PASSWORD: marquez
+      POSTGRES_DB: marquez
+    volumes:
+      - marquez-db-volume:/var/lib/postgresql/data
+    healthcheck:
+      test: ["CMD", "pg_isready", "-U", "marquez"]
+      interval: 5s
+      timeout: 5s
+      retries: 5
+
+  marquez:
+    image: marquezproject/marquez:0.50.0
+    profiles: ["lineage"]
+    depends_on:
+      marquez-db:
+        condition: service_healthy
+    environment:
+      MARQUEZ_PORT: 5000
+      MARQUEZ_ADMIN_PORT: 5001
+      POSTGRES_HOST: marquez-db
+      POSTGRES_PORT: 5432
+      POSTGRES_DB: marquez
+      POSTGRES_USER: marquez
+      POSTGRES_PASSWORD: marquez
+    ports:
+      - "5000:5000"
+      - "5001:5001"
+    healthcheck:
+      test: ["CMD", "curl", "-f", "http://localhost:5000/api/v1/namespaces"]
+      interval: 10s
+      timeout: 5s
+      retries: 10
+      start_period: 30s
+
+  marquez-web:
+    image: marquezproject/marquez-web:0.50.0
+    profiles: ["lineage"]
+    depends_on:
+      marquez:
+        condition: service_healthy
+    environment:
+      MARQUEZ_HOST: marquez
+      MARQUEZ_PORT: "5000"
+    ports:
+      - "3000:3000"
+
   # Optional: flower for monitoring Celery workers
   flower:
     <<: *airflow-common
@@ -192,3 +247,4 @@ services:
 
 volumes:
   postgres-db-volume:
+  marquez-db-volume:
