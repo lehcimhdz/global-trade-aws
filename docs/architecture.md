@@ -136,7 +136,7 @@ The **`comtrade_dbt`** DAG orchestrates a four-task dbt run (`dbt_deps → dbt_r
 | Table format | Apache Iceberg (PyIceberg) | 0.7.1 |
 | Iceberg catalog | AWS Glue Data Catalog | — |
 | SQL transformations | dbt (dbt-athena-community) | 1.8.4 |
-| Query engine | Amazon Athena | — |
+| Query engine | Amazon Athena (dedicated workgroup) | — |
 | Base image | apache/airflow:2.9.3-python3.11 | — |
 | Observability — metrics | AWS CloudWatch | — |
 | Observability — lineage | Marquez (OpenLineage) | 0.50.0 |

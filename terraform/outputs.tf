@@ -50,6 +50,22 @@ output "mwaa_artifacts_bucket" {
   description = "S3 bucket holding DAGs, plugins.zip, and requirements.txt for MWAA"
 }
 
+output "athena_workgroup_name" {
+  value       = aws_athena_workgroup.comtrade.name
+  description = "Athena workgroup name — set as COMTRADE_DBT_TARGET workgroup in dbt profiles.yml"
+}
+
+output "athena_named_queries" {
+  value = {
+    top_exporters_by_period    = aws_athena_named_query.top_exporters_by_period.id
+    top_commodities_by_reporter = aws_athena_named_query.top_commodities_by_reporter.id
+    bilateral_trade_balance    = aws_athena_named_query.bilateral_trade_balance.id
+    yoy_growth_by_reporter     = aws_athena_named_query.yoy_growth_by_reporter.id
+    data_freshness_check       = aws_athena_named_query.data_freshness_check.id
+  }
+  description = "Map of named query identifiers — run via the Athena console or API"
+}
+
 output "cloudwatch_dashboard_url" {
   value       = "https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#dashboards:name=${aws_cloudwatch_dashboard.comtrade_pipeline.dashboard_name}"
   description = "Direct link to the Comtrade Pipeline CloudWatch dashboard"

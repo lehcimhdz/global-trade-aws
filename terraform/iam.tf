@@ -52,6 +52,38 @@ resource "aws_iam_policy" "airflow_data_lake" {
         }
       },
       {
+        # Athena query execution — scoped to the project workgroup.
+        Sid    = "AthenaQueryExecution"
+        Effect = "Allow"
+        Action = [
+          "athena:StartQueryExecution",
+          "athena:StopQueryExecution",
+          "athena:GetQueryExecution",
+          "athena:GetQueryResults",
+          "athena:GetWorkGroup",
+          "athena:ListNamedQueries",
+          "athena:GetNamedQuery",
+        ]
+        Resource = [
+          "arn:aws:athena:*:*:workgroup/${local.name_prefix}-comtrade",
+        ]
+      },
+      {
+        # Athena must read/write its result objects in S3.
+        Sid    = "AthenaResultsBucket"
+        Effect = "Allow"
+        Action = [
+          "s3:GetObject",
+          "s3:PutObject",
+          "s3:GetBucketLocation",
+          "s3:ListBucket",
+        ]
+        Resource = [
+          aws_s3_bucket.data_lake.arn,
+          "${aws_s3_bucket.data_lake.arn}/athena-results/*",
+        ]
+      },
+      {
         # Glue Data Catalog access for PyIceberg table management.
         Sid    = "GlueIcebergCatalog"
         Effect = "Allow"

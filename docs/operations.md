@@ -413,6 +413,57 @@ docker pull <ecr-url>:sha-<git-sha>
 
 ---
 
+## Athena named queries
+
+The Terraform configuration provisions a dedicated Athena workgroup and five pre-built named queries for common trade analyses.
+
+### Workgroup
+
+| Setting | Value |
+|---------|-------|
+| Name | `<project>-<env>-comtrade` |
+| Result location | `s3://<bucket>/athena-results/` |
+| Encryption | SSE-S3 |
+| Byte-scan limit | 10 GB per query (cost guard) |
+| CloudWatch metrics | Enabled |
+
+### Named queries
+
+| Query name | Description |
+|------------|-------------|
+| `top-exporters-by-period` | Top 20 countries by export value for a given year |
+| `top-commodities-by-reporter` | Top 20 commodities for a reporting country |
+| `bilateral-trade-balance` | Import vs export trend between two countries |
+| `yoy-growth-by-reporter` | Year-over-year export/import growth rates |
+| `data-freshness-check` | Latest available period per reporter — verify pipeline health |
+
+### Running a named query
+
+```bash
+# List saved query IDs
+aws athena list-named-queries --work-group <workgroup-name>
+
+# Get query SQL
+aws athena get-named-query --named-query-id <id>
+
+# Start execution
+aws athena start-query-execution \
+  --query-string "$(aws athena get-named-query --named-query-id <id> --query 'NamedQuery.QueryString' --output text)" \
+  --work-group <workgroup-name>
+```
+
+Or open the **Athena console → Saved queries** tab, select the workgroup, and click **Run**.
+
+### After `terraform apply`
+
+The `athena_named_queries` output maps query names to their IDs:
+
+```bash
+terraform output athena_named_queries
+```
+
+---
+
 ## IAM policy (minimum required)
 
 ```json
