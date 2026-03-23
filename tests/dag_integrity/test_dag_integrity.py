@@ -1,0 +1,239 @@
+"""
+DAG integrity tests
+
+Verifies that all 8 Comtrade DAGs:
+  1. Parse and import without errors
+  2. Have the expected dag_id, schedule, tags, and catchup setting
+  3. Contain exactly 2 tasks with the correct task IDs
+  4. Have no dependency cycles
+
+These tests use Airflow's DagBag — the same mechanism the scheduler uses to
+load DAGs — so they catch import errors, misconfigured operators, and broken
+dependency chains before they reach production.
+
+``airflow.models.Variable.get`` is patched to return sensible defaults so the
+DAGs can be loaded without a populated Airflow Variable store.
+"""
+from __future__ import annotations
+
+from pathlib import Path
+from unittest import mock
+
+import pytest
+
+# Skip this entire module if Airflow is not installed
+pytest.importorskip("airflow", reason="apache-airflow not installed")
+
+pytestmark = pytest.mark.dag_integrity
+
+DAGS_DIR = Path(__file__).parent.parent.parent / "dags"
+
+# ── Expected DAG metadata ─────────────────────────────────────────────────────
+
+EXPECTED_DAGS: dict[str, dict] = {
+    "comtrade_preview": {
+        "schedule": "@monthly",
+        "tags": {"comtrade", "preview", "s3"},
+        "task_ids": {"extract_and_store_raw", "convert_to_parquet"},
+        "catchup": False,
+    },
+    "comtrade_preview_tariffline": {
+        "schedule": "@monthly",
+        "tags": {"comtrade", "tariffline", "s3"},
+        "task_ids": {"extract_and_store_raw", "convert_to_parquet"},
+        "catchup": False,
+    },
+    "comtrade_world_share": {
+        "schedule": "@monthly",
+        "tags": {"comtrade", "world-share", "s3"},
+        "task_ids": {"extract_and_store_raw", "convert_to_parquet"},
+        "catchup": False,
+    },
+    "comtrade_metadata": {
+        "schedule": "@weekly",
+        "tags": {"comtrade", "metadata", "s3"},
+        "task_ids": {"extract_and_store_raw", "convert_to_parquet"},
+        "catchup": False,
+    },
+    "comtrade_mbs": {
+        "schedule": "@monthly",
+        "tags": {"comtrade", "mbs", "s3"},
+        "task_ids": {"extract_and_store_raw", "convert_to_parquet"},
+        "catchup": False,
+    },
+    "comtrade_da_tariffline": {
+        "schedule": "@monthly",
+        "tags": {"comtrade", "da", "tariffline", "s3"},
+        "task_ids": {"extract_and_store_raw", "convert_to_parquet"},
+        "catchup": False,
+    },
+    "comtrade_da": {
+        "schedule": "@monthly",
+        "tags": {"comtrade", "da", "s3"},
+        "task_ids": {"extract_and_store_raw", "convert_to_parquet"},
+        "catchup": False,
+    },
+    "comtrade_releases": {
+        "schedule": "@daily",
+        "tags": {"comtrade", "releases", "s3"},
+        "task_ids": {"extract_and_store_raw", "convert_to_parquet"},
+        "catchup": False,
+    },
+}
+
+
+# ── Fixture: load the DagBag once per module ──────────────────────────────────
+
+
+@pytest.fixture(scope="module")
+def dagbag():
+    """
+    Load all DAGs using Airflow's DagBag with Variable.get patched so that
+    parse-time ``Variable.get(...)`` calls return their ``default_var``.
+    """
+    from airflow.models import DagBag
+
+    def _fake_variable_get(key, default_var=None, **kwargs):
+        return default_var
+
+    with mock.patch("airflow.models.Variable.get", side_effect=_fake_variable_get):
+        bag = DagBag(dag_folder=str(DAGS_DIR), include_examples=False)
+
+    return bag
+
+
+# ── Tests ─────────────────────────────────────────────────────────────────────
+
+
+class TestDagBagLoads:
+    def test_no_import_errors(self, dagbag):
+        """No DAG file must produce an import error."""
+        errors = dagbag.import_errors
+        assert errors == {}, f"DagBag import errors:\n{errors}"
+
+    def test_all_expected_dags_are_present(self, dagbag):
+        """Every expected dag_id must be registered in the DagBag."""
+        missing = set(EXPECTED_DAGS) - set(dagbag.dags)
+        assert not missing, f"Missing DAGs: {missing}"
+
+    def test_no_unexpected_dags(self, dagbag):
+        """There must be no extra DAGs we didn't intend to ship."""
+        unexpected = set(dagbag.dags) - set(EXPECTED_DAGS)
+        assert not unexpected, f"Unexpected DAGs found: {unexpected}"
+
+
+class TestDagSchedule:
+    @pytest.mark.parametrize("dag_id,meta", EXPECTED_DAGS.items())
+    def test_schedule_interval(self, dagbag, dag_id, meta):
+        dag = dagbag.get_dag(dag_id)
+        # Airflow 2.4+ stores timetable; schedule_interval is kept for compatibility
+        actual = dag.schedule_interval or str(dag.timetable)
+        assert actual == meta["schedule"], (
+            f"{dag_id}: expected schedule '{meta['schedule']}', got '{actual}'"
+        )
+
+
+class TestDagConfig:
+    @pytest.mark.parametrize("dag_id,meta", EXPECTED_DAGS.items())
+    def test_catchup_is_false(self, dagbag, dag_id, meta):
+        dag = dagbag.get_dag(dag_id)
+        assert dag.catchup is False, f"{dag_id}: catchup should be False"
+
+    @pytest.mark.parametrize("dag_id,meta", EXPECTED_DAGS.items())
+    def test_tags(self, dagbag, dag_id, meta):
+        dag = dagbag.get_dag(dag_id)
+        assert set(dag.tags) == meta["tags"], (
+            f"{dag_id}: expected tags {meta['tags']}, got {set(dag.tags)}"
+        )
+
+    @pytest.mark.parametrize("dag_id", EXPECTED_DAGS)
+    def test_has_description(self, dagbag, dag_id):
+        dag = dagbag.get_dag(dag_id)
+        assert dag.description, f"{dag_id}: description should not be empty"
+
+    @pytest.mark.parametrize("dag_id", EXPECTED_DAGS)
+    def test_default_args_retries(self, dagbag, dag_id):
+        dag = dagbag.get_dag(dag_id)
+        retries = dag.default_args.get("retries")
+        assert retries is not None and retries >= 1, (
+            f"{dag_id}: default_args.retries should be >= 1"
+        )
+
+    @pytest.mark.parametrize("dag_id", EXPECTED_DAGS)
+    def test_start_date_is_set(self, dagbag, dag_id):
+        dag = dagbag.get_dag(dag_id)
+        assert dag.start_date is not None, f"{dag_id}: start_date must be set"
+
+
+class TestDagTasks:
+    @pytest.mark.parametrize("dag_id,meta", EXPECTED_DAGS.items())
+    def test_task_count(self, dagbag, dag_id, meta):
+        dag = dagbag.get_dag(dag_id)
+        assert len(dag.tasks) == len(meta["task_ids"]), (
+            f"{dag_id}: expected {len(meta['task_ids'])} tasks, "
+            f"got {len(dag.tasks)} ({[t.task_id for t in dag.tasks]})"
+        )
+
+    @pytest.mark.parametrize("dag_id,meta", EXPECTED_DAGS.items())
+    def test_task_ids(self, dagbag, dag_id, meta):
+        dag = dagbag.get_dag(dag_id)
+        actual_ids = {t.task_id for t in dag.tasks}
+        assert actual_ids == meta["task_ids"], (
+            f"{dag_id}: expected task IDs {meta['task_ids']}, got {actual_ids}"
+        )
+
+    @pytest.mark.parametrize("dag_id", EXPECTED_DAGS)
+    def test_extract_task_exists(self, dagbag, dag_id):
+        dag = dagbag.get_dag(dag_id)
+        assert dag.has_task("extract_and_store_raw"), (
+            f"{dag_id}: missing task 'extract_and_store_raw'"
+        )
+
+    @pytest.mark.parametrize("dag_id", EXPECTED_DAGS)
+    def test_parquet_task_exists(self, dagbag, dag_id):
+        dag = dagbag.get_dag(dag_id)
+        assert dag.has_task("convert_to_parquet"), (
+            f"{dag_id}: missing task 'convert_to_parquet'"
+        )
+
+    @pytest.mark.parametrize("dag_id", EXPECTED_DAGS)
+    def test_parquet_depends_on_extract(self, dagbag, dag_id):
+        """convert_to_parquet must have extract_and_store_raw as upstream."""
+        dag = dagbag.get_dag(dag_id)
+        parquet_task = dag.get_task("convert_to_parquet")
+        upstream_ids = {t.task_id for t in parquet_task.upstream_list}
+        assert "extract_and_store_raw" in upstream_ids, (
+            f"{dag_id}: 'convert_to_parquet' must depend on 'extract_and_store_raw'"
+        )
+
+    @pytest.mark.parametrize("dag_id", EXPECTED_DAGS)
+    def test_no_cycles(self, dagbag, dag_id):
+        """Airflow raises on cycles during DagBag loading; this is a belt-and-suspenders check."""
+        dag = dagbag.get_dag(dag_id)
+        # DagBag would have raised on import if a cycle existed; verify topological sort works
+        try:
+            dag.topological_sort()
+        except Exception as exc:
+            pytest.fail(f"{dag_id}: topological sort failed (cycle?): {exc}")
+
+
+class TestDagFiles:
+    def test_all_dag_files_exist(self):
+        """Every expected DAG must have a corresponding file on disk."""
+        dag_id_to_file = {
+            "comtrade_preview": "comtrade_preview.py",
+            "comtrade_preview_tariffline": "comtrade_preview_tariffline.py",
+            "comtrade_world_share": "comtrade_world_share.py",
+            "comtrade_metadata": "comtrade_metadata.py",
+            "comtrade_mbs": "comtrade_mbs.py",
+            "comtrade_da_tariffline": "comtrade_da_tariffline.py",
+            "comtrade_da": "comtrade_da.py",
+            "comtrade_releases": "comtrade_releases.py",
+        }
+        for dag_id, filename in dag_id_to_file.items():
+            path = DAGS_DIR / filename
+            assert path.exists(), f"DAG file missing: {path}"
+
+    def test_plugin_package_has_init(self):
+        plugins_init = DAGS_DIR.parent / "plugins" / "comtrade" / "__init__.py"
+        assert plugins_init.exists(), f"Plugin __init__.py missing: {plugins_init}"

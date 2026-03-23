@@ -12,6 +12,7 @@ Apache Airflow pipeline that extracts trade data from the [UN Comtrade public AP
 | [docs/configuration.md](docs/configuration.md) | All Airflow Variables and `.env` settings with examples |
 | [docs/plugins.md](docs/plugins.md) | Plugin system internals — client, S3 writer, DAG factory |
 | [docs/operations.md](docs/operations.md) | Deployment, monitoring, troubleshooting, IAM policy |
+| [docs/testing.md](docs/testing.md) | Test suite structure, how to run, mocking strategy, CI integration |
 
 ---
 
