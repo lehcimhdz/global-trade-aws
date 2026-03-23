@@ -51,6 +51,27 @@ resource "aws_iam_policy" "airflow_data_lake" {
           }
         }
       },
+      {
+        # Glue Data Catalog access for PyIceberg table management.
+        Sid    = "GlueIcebergCatalog"
+        Effect = "Allow"
+        Action = [
+          "glue:CreateDatabase",
+          "glue:GetDatabase",
+          "glue:GetDatabases",
+          "glue:CreateTable",
+          "glue:GetTable",
+          "glue:GetTables",
+          "glue:UpdateTable",
+          "glue:DeleteTable",
+          "glue:BatchDeleteTable",
+        ]
+        Resource = [
+          "arn:aws:glue:*:*:catalog",
+          "arn:aws:glue:*:*:database/comtrade",
+          "arn:aws:glue:*:*:table/comtrade/*",
+        ]
+      },
     ]
   })
 }

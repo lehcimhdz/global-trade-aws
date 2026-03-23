@@ -70,6 +70,7 @@ Shared Python library mounted into every Airflow container via the `plugins/` vo
 | `metrics.py` | CloudWatch custom metric emission after each validation run |
 | `lineage.py` | OpenLineage event emission to Marquez after each task |
 | `schema.py` | Schema drift detection — column-set diff against S3 baseline + Slack alert |
+| `iceberg.py` | Apache Iceberg writer — ACID appends to Glue-backed tables with schema evolution |
 
 ### DAG files (`dags/`)
 Thin orchestration files — one per API endpoint. They declare schedules, read Airflow Variables, and wire tasks produced by the factory.
@@ -130,6 +131,8 @@ After each task, cross-cutting side effects fire automatically (never masking ta
 | API client | requests + urllib3 Retry | 2.32.3 |
 | Cloud storage | boto3 / AWS S3 | 1.34.144 |
 | Columnar format | pandas + pyarrow | 2.2.2 / 16.1.0 |
+| Table format | Apache Iceberg (PyIceberg) | 0.7.1 |
+| Iceberg catalog | AWS Glue Data Catalog | — |
 | Base image | apache/airflow:2.9.3-python3.11 | — |
 | Observability — metrics | AWS CloudWatch | — |
 | Observability — lineage | Marquez (OpenLineage) | 0.50.0 |

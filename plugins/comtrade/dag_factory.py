@@ -18,6 +18,7 @@ from airflow.decorators import task
 from airflow.models import Variable
 
 from comtrade.callbacks import task_failure_callback
+from comtrade.iceberg import write_to_iceberg
 from comtrade.lineage import emit_task_complete
 from comtrade.metrics import emit_validation_metrics
 from comtrade.schema import detect_and_alert as detect_schema_drift
@@ -265,3 +266,69 @@ def make_parquet_task(
         return parquet_uri
 
     return convert_to_parquet
+
+
+def make_iceberg_task(endpoint: str):
+    """
+    Returns an @task function that reads the validated bronze JSON from S3,
+    extracts the ``data`` array, and appends it to the Glue-backed Iceberg
+    table for *endpoint*.
+
+    The task is a no-op (returns ``None``) when ``COMTRADE_WRITE_ICEBERG``
+    is not ``"true"``.  Iceberg failures are caught internally and never
+    propagate to Airflow — the task always succeeds.
+
+    Parameters
+    ----------
+    endpoint:
+        Comtrade endpoint name — becomes the Glue table name.
+    """
+
+    @task(task_id="write_to_iceberg", on_failure_callback=task_failure_callback)
+    def write_to_iceberg_task(json_key: str, **context) -> Optional[str]:
+        import boto3
+
+        iceberg_enabled = (
+            Variable.get("COMTRADE_WRITE_ICEBERG", default_var="false").lower() == "true"
+        )
+        if not iceberg_enabled:
+            logger.info(
+                "Iceberg writes disabled (COMTRADE_WRITE_ICEBERG != true). Skipping."
+            )
+            return None
+
+        bucket = _bucket()
+        region = Variable.get("AWS_DEFAULT_REGION", default_var="us-east-1")
+
+        obj = boto3.client(
+            "s3",
+            aws_access_key_id=Variable.get("AWS_ACCESS_KEY_ID", default_var=None),
+            aws_secret_access_key=Variable.get("AWS_SECRET_ACCESS_KEY", default_var=None),
+            region_name=region,
+        ).get_object(Bucket=bucket, Key=json_key)
+
+        raw = json.loads(obj["Body"].read())
+        records = raw.get("data", raw) if isinstance(raw, dict) else raw
+        if not isinstance(records, list) or not records:
+            logger.warning("No records to write to Iceberg for endpoint=%s", endpoint)
+            return None
+
+        identifier = write_to_iceberg(
+            records=records,
+            endpoint=endpoint,
+            bucket=bucket,
+            region=region,
+        )
+
+        if identifier:
+            emit_task_complete(
+                dag_id=context["dag"].dag_id,
+                task_id="write_to_iceberg",
+                run_id=context["run_id"],
+                input_uris=[f"s3://{bucket}/{json_key}"],
+                output_uris=[f"s3://{bucket}/iceberg/{endpoint}"],
+            )
+
+        return identifier
+
+    return write_to_iceberg_task

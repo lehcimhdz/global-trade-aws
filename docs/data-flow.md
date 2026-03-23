@@ -46,17 +46,30 @@ Airflow Scheduler
       │          ▼
       │    (no new S3 object — validates the bronze JSON in place)
       │
-      └─── Task 3: convert_to_parquet   (skipped if COMTRADE_WRITE_PARQUET != "true")
+      ├─── Task 3: convert_to_parquet   (skipped if COMTRADE_WRITE_PARQUET != "true")
+      │          │
+      │          │  1. Read S3 key from XCom (output of Task 2)
+      │          │  2. GET JSON object from S3
+      │          │  3. Extract response["data"] array
+      │          │  4. pd.json_normalize(records) → DataFrame
+      │          │  5. df.to_parquet(engine="pyarrow") → BytesIO
+      │          │  6. PUT to S3 (Content-Type: application/octet-stream)
+      │          │  7. Emit OpenLineage COMPLETE event → Marquez
+      │          ▼
+      │    S3: comtrade/<endpoint>/type=X/freq=Y/year=YYYY/month=MM/fmt=parquet/<run_id>.parquet
+      │
+      └─── Task 4: write_to_iceberg   (skipped if COMTRADE_WRITE_ICEBERG != "true")
                  │
                  │  1. Read S3 key from XCom (output of Task 2)
                  │  2. GET JSON object from S3
                  │  3. Extract response["data"] array
-                 │  4. pd.json_normalize(records) → DataFrame
-                 │  5. df.to_parquet(engine="pyarrow") → BytesIO
-                 │  6. PUT to S3 (Content-Type: application/octet-stream)
-                 │  7. Emit OpenLineage COMPLETE event → Marquez
+                 │  4. Convert records to PyArrow Table
+                 │  5. Open or create Glue-backed Iceberg table
+                 │  6. Evolve schema if new columns are present (union_by_name)
+                 │  7. Append PyArrow Table (ACID commit)
+                 │  8. Emit OpenLineage COMPLETE event → Marquez
                  ▼
-           S3: comtrade/<endpoint>/type=X/freq=Y/year=YYYY/month=MM/fmt=parquet/<run_id>.parquet
+           Iceberg: s3://<bucket>/iceberg/<endpoint>/  (Glue table: comtrade.<endpoint>)
 ```
 
 ---
@@ -132,9 +145,14 @@ validate_bronze(json_key=<XCom value>)
         │  stored in: XCom (key="return_value")
         ▼
 convert_to_parquet(json_key=<XCom value>)
+        │
+        │  returns: Parquet S3 URI (or None if skipped)
+        │  stored in: XCom (key="return_value")  [not consumed downstream]
+        ▼
+write_to_iceberg(json_key=<XCom value from validate_bronze>)
 ```
 
-The `json_key` argument in each downstream task is automatically resolved from XCom by the Airflow TaskFlow API (`@task` decorator). `validate_bronze` returns the same key it received so the Parquet task can use it unchanged.
+The `json_key` argument in each downstream task is automatically resolved from XCom by the Airflow TaskFlow API (`@task` decorator). `validate_bronze` returns the same key it received so the Parquet and Iceberg tasks can both use it unchanged.
 
 ---
 

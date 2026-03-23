@@ -17,7 +17,8 @@ plugins/
     ├── callbacks.py      — Slack failure notifications, SLA miss alerts, dead-letter S3 manifest
     ├── metrics.py        — CloudWatch custom metric emission (RowCount, ChecksPassed, …)
     ├── lineage.py        — OpenLineage event emission to Marquez
-    └── schema.py         — Schema drift detection and Slack alerting
+    ├── schema.py         — Schema drift detection and Slack alerting
+    └── iceberg.py        — Apache Iceberg writer (ACID appends to Glue-backed tables)
 ```
 
 ---
@@ -454,3 +455,62 @@ Returns a `SchemaDriftResult` if drift was found, `None` otherwise.
 ### Configuration
 
 No extra configuration required. Reuses `COMTRADE_SLACK_WEBHOOK_URL` for alerts and the existing S3 credentials. If the webhook is not set, the alert is suppressed and a warning is logged.
+
+---
+
+## `iceberg.py`
+
+### Purpose
+
+Appends validated trade records to a **Glue-backed Apache Iceberg table**, providing ACID writes, time travel, partition evolution, and automatic schema evolution. All `pyiceberg` imports are lazy — the module can be imported and tested without the package installed. Errors are caught and logged; Iceberg failures never fail the pipeline.
+
+### Table layout
+
+| Property | Value |
+|----------|-------|
+| Glue database | `comtrade` |
+| Glue table | `<endpoint>` (e.g., `preview`, `getMBS`) |
+| S3 location | `s3://<bucket>/iceberg/<endpoint>/` |
+
+### Functions
+
+#### `write_to_iceberg(records, endpoint, bucket, region)`
+
+The main entry point. Converts *records* to a PyArrow Table, opens or creates the Glue-backed Iceberg table, and appends the data in a single ACID commit.
+
+- If the table already exists and the current records contain new columns, the schema is evolved automatically via `union_by_name` — no manual migration required.
+- Returns the Iceberg table identifier (`comtrade.<endpoint>`) on success, `None` on failure or when *records* is empty.
+
+#### Internal helpers (not part of the public API)
+
+| Function | Purpose |
+|----------|---------|
+| `_warehouse_uri(bucket)` | `s3://<bucket>/iceberg` |
+| `_table_identifier(endpoint)` | `comtrade.<endpoint>` |
+| `_table_location(bucket, endpoint)` | `s3://<bucket>/iceberg/<endpoint>` |
+| `_records_to_pa_table(records)` | Convert list-of-dicts to PyArrow Table |
+| `_get_catalog(region, warehouse)` | Load PyIceberg Glue catalog |
+| `_ensure_namespace(catalog, database)` | Create Glue database if missing |
+| `_load_or_create_table(catalog, identifier, pa_table, location)` | Load or create Iceberg table, evolve schema |
+
+### `make_iceberg_task()` (in `dag_factory.py`)
+
+```python
+def make_iceberg_task(endpoint: str) -> Callable
+```
+
+Returns an `@task(task_id="write_to_iceberg")` function. When Airflow executes it:
+
+1. Checks `COMTRADE_WRITE_ICEBERG` Variable — skips if not `"true"`.
+2. Downloads the validated bronze JSON from S3 using the key passed via XCom.
+3. Extracts the `data` array from the response envelope.
+4. Calls `write_to_iceberg()` and returns the Iceberg table identifier (or `None` if skipped/empty).
+5. Emits an OpenLineage `COMPLETE` event on success.
+
+### Configuration
+
+```dotenv
+COMTRADE_WRITE_ICEBERG=true
+```
+
+Requires `pyiceberg[glue,pyarrow]` in `requirements.txt` and the Glue Data Catalog database to exist (created by `terraform/glue.tf`). IAM permissions for `glue:CreateTable`, `glue:GetTable`, etc. are added to the Airflow IAM policy in `terraform/iam.tf`.
