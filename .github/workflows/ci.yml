@@ -1,0 +1,167 @@
+name: CI
+
+on:
+  push:
+    branches: [main, develop]
+  pull_request:
+    branches: [main]
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 1: Lint & format (fast — no Airflow install)
+  # ────────────────────────────────────────────────────────────────────────────
+  lint:
+    name: Lint & Format
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install quality tools
+        run: |
+          pip install \
+            black==24.4.2 \
+            isort==5.13.2 \
+            flake8==7.1.0 \
+            flake8-bugbear \
+            flake8-comprehensions \
+            mypy==1.10.0 \
+            types-requests
+
+      - name: black
+        run: black --check plugins/ dags/ tests/
+
+      - name: isort
+        run: isort --check-only plugins/ dags/ tests/
+
+      - name: flake8
+        run: flake8 plugins/ dags/ tests/
+
+      - name: mypy
+        run: mypy plugins/comtrade/ --ignore-missing-imports --no-strict-optional
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 2: Fast unit tests (no Airflow — runs in ~30 s)
+  # ────────────────────────────────────────────────────────────────────────────
+  unit-tests:
+    name: Unit Tests (no Airflow)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+          cache: pip
+
+      - name: Install minimal dependencies
+        run: pip install requests urllib3 responses pytest pytest-mock
+
+      - name: Run client unit tests
+        run: pytest tests/unit/test_client.py -v --tb=short
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 3: Full test suite with Airflow (runs after lint + unit-tests pass)
+  # ────────────────────────────────────────────────────────────────────────────
+  full-tests:
+    name: Full Test Suite (Airflow ${{ matrix.airflow-version }})
+    runs-on: ubuntu-latest
+    needs: [lint, unit-tests]
+    strategy:
+      fail-fast: false
+      matrix:
+        python-version: ["3.11"]
+        airflow-version: ["2.9.3"]
+    env:
+      AIRFLOW_VERSION: ${{ matrix.airflow-version }}
+      PYTHON_VERSION: ${{ matrix.python-version }}
+
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      - name: Install Airflow and dependencies
+        run: |
+          # Pin Airflow version with constraints for reproducible installs
+          CONSTRAINT_URL="https://raw.githubusercontent.com/apache/airflow/constraints-${AIRFLOW_VERSION}/constraints-${PYTHON_VERSION}.txt"
+          pip install "apache-airflow[amazon]==${AIRFLOW_VERSION}" \
+            apache-airflow-providers-amazon==8.24.0 \
+            boto3==1.34.144 \
+            requests==2.32.3 \
+            pandas==2.2.2 \
+            pyarrow==16.1.0 \
+            --constraint "${CONSTRAINT_URL}"
+
+      - name: Install test dependencies
+        run: pip install -r tests/requirements-test.txt pytest-cov
+
+      - name: Run full test suite with coverage
+        run: |
+          pytest tests/ -v --tb=short \
+            --cov=comtrade \
+            --cov-report=xml \
+            --cov-report=term-missing \
+            -q
+
+      - name: Upload coverage to Codecov
+        if: matrix.python-version == '3.11'
+        uses: codecov/codecov-action@v4
+        with:
+          file: coverage.xml
+          flags: full-suite
+          fail_ci_if_error: false
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Job 4: Terraform validate (no AWS credentials needed)
+  # ────────────────────────────────────────────────────────────────────────────
+  terraform-validate:
+    name: Terraform Validate
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: hashicorp/setup-terraform@v3
+        with:
+          terraform_version: "1.7.5"
+
+      - name: Terraform Format Check
+        run: terraform fmt -check -recursive terraform/
+
+      - name: Terraform Init (local backend only)
+        run: terraform -chdir=terraform init -backend=false
+
+      - name: Terraform Validate
+        run: terraform -chdir=terraform validate
+
+  # ────────────────────────────────────────────────────────────────────────────
+  # Status gate — single required check for branch protection
+  # ────────────────────────────────────────────────────────────────────────────
+  ci-pass:
+    name: CI Pass
+    runs-on: ubuntu-latest
+    needs: [lint, unit-tests, full-tests, terraform-validate]
+    if: always()
+    steps:
+      - name: Check all jobs passed
+        run: |
+          if [[ "${{ needs.lint.result }}" != "success" || \
+                "${{ needs.unit-tests.result }}" != "success" || \
+                "${{ needs.full-tests.result }}" != "success" || \
+                "${{ needs.terraform-validate.result }}" != "success" ]]; then
+            echo "One or more CI jobs failed."
+            exit 1
+          fi
+          echo "All CI jobs passed."

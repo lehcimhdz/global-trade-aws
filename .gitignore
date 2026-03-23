@@ -1,8 +1,33 @@
+# ── Environment ───────────────────────────────
 .env
+
+# ── Python ────────────────────────────────────
 logs/
 __pycache__/
 *.pyc
 *.pyo
 .pytest_cache/
+htmlcov/
+.coverage
+coverage.xml
+*.egg-info/
+.venv/
+
+# ── Terraform ─────────────────────────────────
+terraform/.terraform/
+terraform/.terraform.lock.hcl
+terraform/*.tfstate
+terraform/*.tfstate.backup
+terraform/*.tfplan
+terraform/environments/*.tfvars.backup
+
+# ── Secrets ───────────────────────────────────
+.secrets.baseline
+
+# ── OS ────────────────────────────────────────
 .DS_Store
 .claude
+
+# ── Test artefacts ────────────────────────────
+tests/.airflow_test.db
+tests/.airflow_home/

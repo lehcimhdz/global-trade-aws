@@ -14,11 +14,20 @@ x-airflow-common: &airflow-common
     AIRFLOW__CORE__LOAD_EXAMPLES: 'false'
     AIRFLOW__API__AUTH_BACKENDS: 'airflow.api.auth.backend.basic_auth,airflow.api.auth.backend.session'
     AIRFLOW__SCHEDULER__ENABLE_HEALTH_CHECK: 'true'
-    # Expose AWS credentials to all containers so boto3 / airflow-providers-amazon can find them
+    # ── AWS credentials (used by boto3 and the Secrets Manager backend) ───────
     AWS_ACCESS_KEY_ID: ${AWS_ACCESS_KEY_ID}
     AWS_SECRET_ACCESS_KEY: ${AWS_SECRET_ACCESS_KEY}
     AWS_DEFAULT_REGION: ${AWS_DEFAULT_REGION:-us-east-1}
-    # Seed Variables on first start (optional — you can also set them in the UI)
+    # ── Secrets Manager backend ───────────────────────────────────────────────
+    # When AIRFLOW_SECRETS_BACKEND=aws, Airflow looks up Variables in Secrets
+    # Manager at path airflow/variables/<VARIABLE_NAME> before falling back to
+    # the Airflow DB.  Set to "db" to use only the Airflow DB (default for local
+    # dev without Terraform applied).
+    AIRFLOW__SECRETS__BACKEND: >-
+      ${AIRFLOW_SECRETS_BACKEND:-airflow.secrets.local_filesystem.LocalFilesystemBackend}
+    AIRFLOW__SECRETS__BACKEND_KWARGS: >-
+      ${AIRFLOW_SECRETS_BACKEND_KWARGS:-{"variables_file_path": "/opt/airflow/airflow_variables.json"}}
+    # ── Seed Variables on first start (optional) ──────────────────────────────
     _AIRFLOW_DB_MIGRATE: 'true'
     _AIRFLOW_WWW_USER_CREATE: 'true'
     _AIRFLOW_WWW_USER_USERNAME: ${_AIRFLOW_WWW_USER_USERNAME:-admin}
