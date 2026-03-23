@@ -2,6 +2,19 @@
 
 Apache Airflow pipeline that extracts trade data from the [UN Comtrade public API](https://comtradeapi.un.org) and stores it in AWS S3 as a data lake.
 
+## Documentation
+
+| Document | Description |
+|----------|-------------|
+| [docs/architecture.md](docs/architecture.md) | System architecture, component responsibilities, infrastructure topology |
+| [docs/data-flow.md](docs/data-flow.md) | End-to-end pipeline flow, S3 structure, retry behaviour |
+| [docs/api-reference.md](docs/api-reference.md) | All 8 Comtrade endpoints, parameters, and rate limits |
+| [docs/configuration.md](docs/configuration.md) | All Airflow Variables and `.env` settings with examples |
+| [docs/plugins.md](docs/plugins.md) | Plugin system internals — client, S3 writer, DAG factory |
+| [docs/operations.md](docs/operations.md) | Deployment, monitoring, troubleshooting, IAM policy |
+
+---
+
 ## Project structure
 
 ```
