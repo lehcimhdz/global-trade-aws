@@ -1,20 +1,24 @@
 """
 Airflow failure callbacks for Comtrade DAGs.
 
-Sends a Slack notification whenever a task fails (after retries are exhausted).
-The webhook URL is read at call time from Airflow Variable
-``COMTRADE_SLACK_WEBHOOK_URL`` (backed by AWS Secrets Manager in production).
+On every task failure (after retries are exhausted) two things happen:
 
-If the variable is not set the callback logs a warning and returns silently —
-this keeps local development friction-free without requiring a Slack workspace.
+1. **Dead-letter manifest** — a structured JSON file is written to S3 under
+   ``comtrade/errors/dag_id=.../task_id=.../year=.../month=.../``.
+   This is a durable, Athena-queryable record of every failure regardless of
+   whether Slack is configured.
+
+2. **Slack notification** — a Block Kit message is posted to the configured
+   Incoming Webhook.  If ``COMTRADE_SLACK_WEBHOOK_URL`` is not set the alert
+   is suppressed with a warning log; the manifest is still written.
 
 Design notes
 ------------
 * Pure stdlib HTTP (``urllib.request``) — no extra dependencies.
-* All Airflow imports are lazy (inside functions) so this module can be
-  imported and unit-tested without an Airflow installation.
-* Notification failures are caught and logged; they must never mask the
-  original task failure.
+* All Airflow / boto3 imports are lazy so this module can be imported and
+  unit-tested without Airflow or AWS credentials.
+* All side-effects (S3 write, Slack POST) are caught and logged; they must
+  never mask the original task failure.
 """
 from __future__ import annotations
 
@@ -111,6 +115,89 @@ def _build_task_failure_payload(context: Dict[str, Any]) -> Dict[str, Any]:
             },
         ]
     }
+
+
+# ── Dead-letter manifest ──────────────────────────────────────────────────────
+
+
+def _build_error_manifest(context: Dict[str, Any]) -> Dict[str, Any]:
+    """
+    Build the error manifest dict from an Airflow task context.
+
+    Pure function — no I/O.  Exposed for unit testing.
+    """
+    from datetime import datetime, timezone
+
+    dag_id = context["dag"].dag_id
+    ti = context["task_instance"]
+    execution_date = context.get("execution_date", context.get("logical_date"))
+    exception = context.get("exception")
+
+    return {
+        "schema_version": "1",
+        "dag_id": dag_id,
+        "task_id": ti.task_id,
+        "run_id": context.get("run_id", "unknown"),
+        "execution_date": str(execution_date) if execution_date is not None else None,
+        "failed_at": datetime.now(timezone.utc).isoformat(),
+        "exception_type": type(exception).__name__ if exception is not None else None,
+        "exception_message": str(exception) if exception is not None else None,
+    }
+
+
+def write_error_manifest(context: Dict[str, Any]) -> Optional[str]:
+    """
+    Write a structured JSON error manifest to S3.
+
+    S3 key pattern (Hive-partitioned for Athena):
+        comtrade/errors/dag_id=<dag>/task_id=<task>/year=YYYY/month=MM/<run_id>.json
+
+    Returns the S3 key on success, ``None`` on failure.  Never raises.
+    """
+    try:
+        from datetime import datetime, timezone
+
+        import boto3
+        from airflow.models import Variable
+
+        manifest = _build_error_manifest(context)
+
+        execution_date = context.get("execution_date", context.get("logical_date"))
+        if hasattr(execution_date, "strftime"):
+            year = execution_date.strftime("%Y")
+            month = execution_date.strftime("%m")
+        else:
+            _now = datetime.now(timezone.utc)
+            year, month = _now.strftime("%Y"), _now.strftime("%m")
+
+        safe_run_id = manifest["run_id"].replace(":", "-").replace("+", "-")
+        key = (
+            f"comtrade/errors"
+            f"/dag_id={manifest['dag_id']}"
+            f"/task_id={manifest['task_id']}"
+            f"/year={year}/month={month}"
+            f"/{safe_run_id}.json"
+        )
+
+        bucket = Variable.get("COMTRADE_S3_BUCKET")
+        boto3.client(
+            "s3",
+            aws_access_key_id=Variable.get("AWS_ACCESS_KEY_ID", default_var=None),
+            aws_secret_access_key=Variable.get("AWS_SECRET_ACCESS_KEY", default_var=None),
+            region_name=Variable.get("AWS_DEFAULT_REGION", default_var="us-east-1"),
+        ).put_object(
+            Bucket=bucket,
+            Key=key,
+            Body=json.dumps(manifest, default=str).encode(),
+            ContentType="application/json",
+        )
+
+        logger.info("Error manifest written: s3://%s/%s", bucket, key)
+        return key
+
+    except Exception as exc:
+        logger.error("Failed to write error manifest to S3: %s", exc)
+        return None
 
 
 # ── Public callbacks ──────────────────────────────────────────────────────────
@@ -218,6 +305,10 @@ def task_failure_callback(context: Dict[str, Any]) -> None:
 
         default_args = {"on_failure_callback": task_failure_callback}
     """
+    # 1. Durable dead-letter record — always, regardless of Slack config.
+    write_error_manifest(context)
+
+    # 2. Real-time Slack notification — only when webhook is configured.
     webhook_url = _get_webhook_url()
     if not webhook_url:
         logger.warning(

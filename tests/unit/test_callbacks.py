@@ -3,6 +3,7 @@ Unit tests for plugins/comtrade/callbacks.py
 
 The module has no Airflow dependency at import time — all Airflow references
 are lazy (inside functions).  These tests cover:
+  - Dead-letter manifest structure and S3 key format
   - Slack payload structure
   - Behaviour when webhook URL is missing
   - HTTP posting (mocked)
@@ -17,12 +18,14 @@ from unittest import mock
 import pytest
 
 from comtrade.callbacks import (
+    _build_error_manifest,
     _build_sla_miss_payload,
     _build_task_failure_payload,
     _get_webhook_url,
     _post_slack,
     sla_miss_callback,
     task_failure_callback,
+    write_error_manifest,
 )
 
 
@@ -51,6 +54,171 @@ def _make_context(
         "execution_date": execution_date,
         "exception": exception,
     }
+
+
+# ── _build_error_manifest ─────────────────────────────────────────────────────
+
+
+class TestBuildErrorManifest:
+    def test_contains_required_fields(self):
+        ctx = _make_context()
+        manifest = _build_error_manifest(ctx)
+        for field in ("schema_version", "dag_id", "task_id", "run_id",
+                      "execution_date", "failed_at", "exception_type", "exception_message"):
+            assert field in manifest, f"missing field: {field}"
+
+    def test_schema_version_is_string_one(self):
+        manifest = _build_error_manifest(_make_context())
+        assert manifest["schema_version"] == "1"
+
+    def test_dag_id_captured(self):
+        ctx = _make_context(dag_id="comtrade_mbs")
+        assert _build_error_manifest(ctx)["dag_id"] == "comtrade_mbs"
+
+    def test_task_id_captured(self):
+        ctx = _make_context(task_id="validate_bronze")
+        assert _build_error_manifest(ctx)["task_id"] == "validate_bronze"
+
+    def test_run_id_captured(self):
+        ctx = _make_context(run_id="manual__2024-06-01")
+        assert _build_error_manifest(ctx)["run_id"] == "manual__2024-06-01"
+
+    def test_exception_type_captured(self):
+        ctx = _make_context(exception=ValueError("bad"))
+        assert _build_error_manifest(ctx)["exception_type"] == "ValueError"
+
+    def test_exception_message_captured(self):
+        ctx = _make_context(exception=RuntimeError("boom"))
+        assert _build_error_manifest(ctx)["exception_message"] == "boom"
+
+    def test_no_exception_fields_are_none(self):
+        ctx = _make_context(exception=None)
+        manifest = _build_error_manifest(ctx)
+        assert manifest["exception_type"] is None
+        assert manifest["exception_message"] is None
+
+    def test_execution_date_as_string(self):
+        ctx = _make_context(execution_date="2024-03-01T00:00:00+00:00")
+        manifest = _build_error_manifest(ctx)
+        assert "2024-03-01" in manifest["execution_date"]
+
+    def test_failed_at_is_iso_format(self):
+        import re
+        manifest = _build_error_manifest(_make_context())
+        # ISO 8601: YYYY-MM-DDTHH:MM:SS...
+        assert re.match(r"\d{4}-\d{2}-\d{2}T\d{2}:\d{2}:\d{2}", manifest["failed_at"])
+
+
+# ── write_error_manifest ──────────────────────────────────────────────────────
+
+
+class TestWriteErrorManifest:
+    def _fake_variable_get(self, key, default_var=None, **kwargs):
+        return {
+            "COMTRADE_S3_BUCKET": "test-bucket",
+            "AWS_ACCESS_KEY_ID": None,
+            "AWS_SECRET_ACCESS_KEY": None,
+            "AWS_DEFAULT_REGION": "us-east-1",
+        }.get(key, default_var)
+
+    def _fake_airflow_modules(self):
+        """Return a sys.modules patch that provides a stub airflow.models.Variable."""
+        import sys
+
+        fake_variable = mock.MagicMock()
+        fake_variable.get.side_effect = self._fake_variable_get
+
+        fake_models = mock.MagicMock()
+        fake_models.Variable = fake_variable
+
+        fake_airflow = mock.MagicMock()
+        fake_airflow.models = fake_models
+
+        return mock.patch.dict(
+            sys.modules,
+            {"airflow": fake_airflow, "airflow.models": fake_models},
+        )
+
+    def _mock_boto(self):
+        s3 = mock.MagicMock()
+        client = mock.MagicMock()
+        client.put_object.return_value = {}
+        s3.return_value = client
+        return s3, client
+
+    def test_returns_s3_key_on_success(self):
+        s3_mock, _ = self._mock_boto()
+        ctx = _make_context(dag_id="comtrade_preview", task_id="validate_bronze",
+                            run_id="scheduled__2024-03-01")
+        fake_date = mock.MagicMock()
+        fake_date.strftime.side_effect = lambda fmt: {"%-m": "3", "%Y": "2024", "%m": "03"}[fmt] if fmt in ("%Y", "%m") else "2024"
+        ctx["execution_date"] = fake_date
+
+        with mock.patch("boto3.client", s3_mock), self._fake_airflow_modules():
+            result = write_error_manifest(ctx)
+        assert result is not None
+        assert result.startswith("comtrade/errors/")
+        assert result.endswith(".json")
+
+    def test_s3_key_contains_dag_and_task(self):
+        s3_mock, _ = self._mock_boto()
+        ctx = _make_context(dag_id="comtrade_da", task_id="extract_and_store_raw",
+                            run_id="scheduled__2024-01-01")
+        with mock.patch("boto3.client", s3_mock), self._fake_airflow_modules():
+            key = write_error_manifest(ctx)
+        assert key is not None
+        assert "dag_id=comtrade_da" in key
+        assert "task_id=extract_and_store_raw" in key
+
+    def test_s3_key_is_hive_partitioned(self):
+        s3_mock, _ = self._mock_boto()
+        ctx = _make_context(run_id="scheduled__2024-06-15")
+        with mock.patch("boto3.client", s3_mock), self._fake_airflow_modules():
+            key = write_error_manifest(ctx)
+        assert key is not None
+        assert "/year=" in key
+        assert "/month=" in key
+
+    def test_returns_none_when_boto_fails(self):
+        ctx = _make_context()
+        with mock.patch("boto3.client", side_effect=RuntimeError("no credentials")):
+            with self._fake_airflow_modules():
+                result = write_error_manifest(ctx)
+        assert result is None
+
+    def test_returns_none_when_airflow_absent(self):
+        """If Airflow is not installed the function catches the ImportError and returns None."""
+        import sys
+        saved = {k: v for k, v in sys.modules.items() if k.startswith("airflow")}
+        for key in saved:
+            sys.modules[key] = None  # type: ignore[assignment]
+        try:
+            result = write_error_manifest(_make_context())
+            assert result is None
+        finally:
+            for key in saved:
+                sys.modules[key] = saved[key]
+
+    def test_put_object_called_with_correct_bucket(self):
+        s3_mock, s3_client = self._mock_boto()
+        ctx = _make_context()
+        with mock.patch("boto3.client", s3_mock), self._fake_airflow_modules():
+            write_error_manifest(ctx)
+        call_kwargs = s3_client.put_object.call_args
+        assert call_kwargs is not None
+        assert call_kwargs.kwargs.get("Bucket") == "test-bucket"
+
+    def test_put_object_body_is_valid_json(self):
+        s3_mock, s3_client = self._mock_boto()
+        ctx = _make_context(exception=ValueError("bad column"))
+        with mock.patch("boto3.client", s3_mock), self._fake_airflow_modules():
+            write_error_manifest(ctx)
+        call_kwargs = s3_client.put_object.call_args
+        assert call_kwargs is not None
+        body = call_kwargs.kwargs.get("Body", b"")
+        data = json.loads(body.decode())
+        assert data["exception_type"] == "ValueError"
+        assert data["exception_message"] == "bad column"
 
 
 # ── _build_task_failure_payload ───────────────────────────────────────────────
@@ -325,20 +493,38 @@ class TestSlaMissCallback:
 
 
 class TestTaskFailureCallback:
+    def test_always_calls_write_error_manifest(self):
+        """Dead-letter write happens regardless of Slack config."""
+        ctx = _make_context()
+        with mock.patch("comtrade.callbacks.write_error_manifest") as mock_manifest:
+            with mock.patch("comtrade.callbacks._get_webhook_url", return_value=None):
+                task_failure_callback(ctx)
+        mock_manifest.assert_called_once_with(ctx)
+
+    def test_write_manifest_called_even_when_slack_configured(self):
+        ctx = _make_context()
+        with mock.patch("comtrade.callbacks.write_error_manifest") as mock_manifest:
+            with mock.patch("comtrade.callbacks._get_webhook_url", return_value="https://hooks.slack.com/x"):
+                with mock.patch("comtrade.callbacks._post_slack"):
+                    task_failure_callback(ctx)
+        mock_manifest.assert_called_once_with(ctx)
+
     def test_skips_when_no_webhook_url(self, caplog):
         import logging
 
         ctx = _make_context()
-        with mock.patch("comtrade.callbacks._get_webhook_url", return_value=None):
-            with caplog.at_level(logging.WARNING, logger="comtrade.callbacks"):
-                task_failure_callback(ctx)  # must not raise
+        with mock.patch("comtrade.callbacks.write_error_manifest"):
+            with mock.patch("comtrade.callbacks._get_webhook_url", return_value=None):
+                with caplog.at_level(logging.WARNING, logger="comtrade.callbacks"):
+                    task_failure_callback(ctx)  # must not raise
         assert any("not configured" in r.message for r in caplog.records)
 
     def test_posts_when_webhook_configured(self):
         ctx = _make_context()
-        with mock.patch("comtrade.callbacks._get_webhook_url", return_value="https://hooks.slack.com/x"):
-            with mock.patch("comtrade.callbacks._post_slack") as mock_post:
-                task_failure_callback(ctx)
+        with mock.patch("comtrade.callbacks.write_error_manifest"):
+            with mock.patch("comtrade.callbacks._get_webhook_url", return_value="https://hooks.slack.com/x"):
+                with mock.patch("comtrade.callbacks._post_slack") as mock_post:
+                    task_failure_callback(ctx)
         mock_post.assert_called_once()
         payload, url = mock_post.call_args[0]
         assert "blocks" in payload
@@ -346,25 +532,28 @@ class TestTaskFailureCallback:
 
     def test_notification_error_does_not_propagate(self):
         ctx = _make_context()
-        with mock.patch("comtrade.callbacks._get_webhook_url", return_value="https://hooks.slack.com/x"):
-            with mock.patch("comtrade.callbacks._post_slack", side_effect=RuntimeError("network down")):
-                task_failure_callback(ctx)  # must not raise
+        with mock.patch("comtrade.callbacks.write_error_manifest"):
+            with mock.patch("comtrade.callbacks._get_webhook_url", return_value="https://hooks.slack.com/x"):
+                with mock.patch("comtrade.callbacks._post_slack", side_effect=RuntimeError("network down")):
+                    task_failure_callback(ctx)  # must not raise
 
     def test_logs_success_after_post(self, caplog):
         import logging
 
         ctx = _make_context()
-        with mock.patch("comtrade.callbacks._get_webhook_url", return_value="https://hooks.slack.com/x"):
-            with mock.patch("comtrade.callbacks._post_slack"):
-                with caplog.at_level(logging.INFO, logger="comtrade.callbacks"):
-                    task_failure_callback(ctx)
+        with mock.patch("comtrade.callbacks.write_error_manifest"):
+            with mock.patch("comtrade.callbacks._get_webhook_url", return_value="https://hooks.slack.com/x"):
+                with mock.patch("comtrade.callbacks._post_slack"):
+                    with caplog.at_level(logging.INFO, logger="comtrade.callbacks"):
+                        task_failure_callback(ctx)
         assert any("alert sent" in r.message for r in caplog.records)
 
     def test_dag_id_and_task_id_in_slack_payload(self):
         ctx = _make_context(dag_id="comtrade_releases", task_id="convert_to_parquet")
-        with mock.patch("comtrade.callbacks._get_webhook_url", return_value="https://hooks.slack.com/x"):
-            with mock.patch("comtrade.callbacks._post_slack") as mock_post:
-                task_failure_callback(ctx)
+        with mock.patch("comtrade.callbacks.write_error_manifest"):
+            with mock.patch("comtrade.callbacks._get_webhook_url", return_value="https://hooks.slack.com/x"):
+                with mock.patch("comtrade.callbacks._post_slack") as mock_post:
+                    task_failure_callback(ctx)
         payload = mock_post.call_args[0][0]
         payload_str = json.dumps(payload)
         assert "comtrade_releases" in payload_str
