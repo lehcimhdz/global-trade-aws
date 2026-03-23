@@ -66,3 +66,17 @@ variable "mwaa_max_workers" {
   description = "Maximum number of MWAA workers"
   default     = 2
 }
+
+# ── QuickSight ─────────────────────────────────────────────────────────────────
+
+variable "enable_quicksight" {
+  type        = bool
+  description = "Deploy QuickSight data source and datasets on top of the silver Iceberg tables."
+  default     = false
+}
+
+variable "quicksight_username" {
+  type        = string
+  description = "QuickSight username (format: <username>) that will receive dataset permissions. Required when enable_quicksight = true."
+  default     = ""
+}

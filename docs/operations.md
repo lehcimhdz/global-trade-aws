@@ -464,6 +464,72 @@ terraform output athena_named_queries
 
 ---
 
+## QuickSight dashboards
+
+QuickSight provides a managed BI layer on top of the silver Iceberg tables (queried via Athena).  All resources are Terraform-provisioned and gated on a feature flag so they are not deployed by default.
+
+### Enabling QuickSight
+
+```bash
+terraform apply \
+  -var="enable_quicksight=true" \
+  -var="quicksight_username=<your-qs-user>"
+```
+
+`quicksight_username` is the short username shown in **QuickSight → Manage QuickSight → Users** (not the email address).
+
+After `apply`:
+
+```bash
+terraform output quicksight_console_url   # open this URL to build analyses
+terraform output quicksight_data_source_arn
+```
+
+### Provisioned resources
+
+| Resource | Name / ID | Purpose |
+|----------|-----------|---------|
+| IAM role | `<prefix>-quicksight` | Service role — QuickSight assumes this to access Athena, S3, and Glue |
+| IAM policy | `comtrade-data-access` | Inline policy granting least-privilege data lake access |
+| Data source | `<prefix>-athena` | Athena connection via the project workgroup |
+| Dataset | `<prefix>-reporter-summary` | SPICE import — per-country annual trade totals |
+| Dataset | `<prefix>-trade-flows` | SPICE import — commodity-level bilateral flows |
+
+### Datasets
+
+Both datasets use **SPICE** (in-memory cache) for sub-second dashboard rendering and filter to **annual data** (`freq_code = 'A'`).  Monthly data can be queried live by changing `import_mode = "DIRECT_QUERY"` in `terraform/quicksight.tf`.
+
+| Dataset | Source table | Rows | Key columns |
+|---------|-------------|------|-------------|
+| Reporter Summary | `comtrade_silver.reporter_summary` | ~200 × years | `reporter_iso`, `export_value_usd`, `trade_balance_usd` |
+| Trade Flows | `comtrade_silver.trade_flows` | millions × years | `reporter_iso`, `partner_iso`, `commodity_code`, `trade_value_usd` |
+
+### Building analyses
+
+1. Open the **QuickSight console** (`terraform output quicksight_console_url`).
+2. Go to **Datasets** — you will see `Comtrade Reporter Summary` and `Comtrade Trade Flows`.
+3. Click a dataset → **Create analysis**.
+4. Suggested starting visuals:
+   - **Bar chart** — `reporter_name` × `export_value_usd` (filter to a single `period`)
+   - **Line chart** — `period` × `total_trade_value_usd` grouped by `reporter_iso`
+   - **Heat map** — `reporter_iso` × `partner_iso` coloured by `trade_value_usd`
+
+### Refreshing SPICE data
+
+SPICE must be refreshed after each pipeline run (Airflow does not trigger this automatically):
+
+```bash
+# Using the AWS CLI
+aws quicksight create-ingestion \
+  --aws-account-id <account-id> \
+  --data-set-id <prefix>-reporter-summary \
+  --ingestion-id manual-$(date +%Y%m%d%H%M%S)
+```
+
+Or in the console: **Datasets → <dataset> → Refresh → Full refresh**.
+
+---
+
 ## IAM policy (minimum required)
 
 ```json

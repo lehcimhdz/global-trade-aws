@@ -66,6 +66,16 @@ output "athena_named_queries" {
   description = "Map of named query identifiers — run via the Athena console or API"
 }
 
+output "quicksight_data_source_arn" {
+  value       = var.enable_quicksight ? aws_quicksight_data_source.athena[0].arn : null
+  description = "QuickSight Athena data source ARN (null when enable_quicksight = false)"
+}
+
+output "quicksight_console_url" {
+  value       = var.enable_quicksight ? "https://${var.aws_region}.quicksight.aws.amazon.com/sn/start" : null
+  description = "QuickSight console URL — open to build analyses from the provisioned datasets (null when enable_quicksight = false)"
+}
+
 output "cloudwatch_dashboard_url" {
   value       = "https://${var.aws_region}.console.aws.amazon.com/cloudwatch/home?region=${var.aws_region}#dashboards:name=${aws_cloudwatch_dashboard.comtrade_pipeline.dashboard_name}"
   description = "Direct link to the Comtrade Pipeline CloudWatch dashboard"
