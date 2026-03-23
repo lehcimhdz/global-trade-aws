@@ -26,18 +26,23 @@ Airflow Scheduler
       │          │
       │          │  1. Read S3 key from XCom (output of Task 1)
       │          │  2. GET JSON from S3
-      │          │  3. Run check suite (validator.run_checks):
-      │          │       • check_envelope       — response is dict or list
-      │          │       • check_has_data_key   — dict has a 'data' list
-      │          │       • check_row_count       — at least 1 record
-      │          │       • check_no_nulls        — required columns non-null
-      │          │       • check_numeric_non_negative — numeric columns ≥ 0 (WARNING)
-      │          │       • check_period_format   — period matches freq code (A/M)
-      │          │       • check_no_duplicates   — no repeated natural keys (WARNING)
-      │          │  4. Log all results; raise DataQualityError on any ERROR failure
-      │          │  5. Emit CloudWatch metrics (RowCount, ChecksPassed, ChecksFailed, JsonBytesWritten)
-      │          │  6. Emit OpenLineage COMPLETE event → Marquez
-      │          │  7. Return same S3 key → XCom (pass-through)
+      │          │  3. Schema drift detection (schema.detect_and_alert):
+      │          │       • Extract column union across all records
+      │          │       • Compare against s3://…/comtrade/schemas/<endpoint>.json
+      │          │       • First run: save baseline
+      │          │       • Drift found: WARNING log + Slack alert + update baseline
+      │          │  4. Run check suite (validator.run_checks):
+      │          │       • check_envelope             — response is dict or list
+      │          │       • check_has_data_key         — dict has a 'data' list
+      │          │       • check_row_count             — at least 1 record
+      │          │       • check_no_nulls              — required columns non-null
+      │          │       • check_numeric_non_negative  — numeric columns ≥ 0 (WARNING)
+      │          │       • check_period_format         — period matches freq code (A/M)
+      │          │       • check_no_duplicates         — no repeated natural keys (WARNING)
+      │          │  8. Log all results; raise DataQualityError on any ERROR failure
+      │          │  9. Emit CloudWatch metrics (RowCount, ChecksPassed, ChecksFailed, JsonBytesWritten)
+      │          │  10. Emit OpenLineage COMPLETE event → Marquez
+      │          │  11. Return same S3 key → XCom (pass-through)
       │          ▼
       │    (no new S3 object — validates the bronze JSON in place)
       │
@@ -148,6 +153,7 @@ The `json_key` argument in each downstream task is automatically resolved from X
 | SLA miss | `sla_miss_callback` | Slack notification when DAG exceeds SLA window |
 | Observability | CloudWatch metrics | Emitted by `validate_bronze` — RowCount, ChecksPassed/Failed, Bytes |
 | Lineage | OpenLineage → Marquez | Emitted after each task when `OPENLINEAGE_URL` is set |
+| Schema drift | WARNING + Slack + S3 update | Detected by `validate_bronze` before quality checks |
 
 ---
 

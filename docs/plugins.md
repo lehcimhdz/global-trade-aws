@@ -16,7 +16,8 @@ plugins/
     ├── validator.py      — Pure-Python data quality checks (no Airflow dependency)
     ├── callbacks.py      — Slack failure notifications, SLA miss alerts, dead-letter S3 manifest
     ├── metrics.py        — CloudWatch custom metric emission (RowCount, ChecksPassed, …)
-    └── lineage.py        — OpenLineage event emission to Marquez
+    ├── lineage.py        — OpenLineage event emission to Marquez
+    └── schema.py         — Schema drift detection and Slack alerting
 ```
 
 ---
@@ -391,3 +392,65 @@ OPENLINEAGE_URL=http://marquez:5000
 ```
 
 Or start the bundled Marquez stack (see [Operations — Data lineage](operations.md#data-lineage-marquez)).
+
+---
+
+## `schema.py`
+
+### Purpose
+
+Detects column-set changes (schema drift) in the Comtrade API responses between pipeline runs. The column set from each run is compared against a per-endpoint baseline stored in S3; if it differs, a Slack alert is sent and the baseline is updated. All Airflow / boto3 imports are lazy; errors are caught without propagating.
+
+### Schema storage
+
+Baselines are stored as small JSON files in the data lake:
+
+```
+s3://<COMTRADE_S3_BUCKET>/comtrade/schemas/<endpoint>.json
+```
+
+Format:
+
+```json
+{
+  "schema_version": "1",
+  "endpoint": "preview",
+  "columns": ["cmdCode", "flowCode", "period", "primaryValue", "..."],
+  "column_count": 42,
+  "captured_at": "2024-03-01T00:00:00+00:00",
+  "run_id": "scheduled__2024-03-01T00-00-00"
+}
+```
+
+### Drift lifecycle
+
+| Run | Previous schema | Current columns | Action |
+|-----|----------------|-----------------|--------|
+| 1st | Not found | Any | Save baseline, INFO logged |
+| Nth | Identical | Same | No-op, DEBUG logged |
+| Nth | Differs | Added and/or removed | WARNING logged + Slack alert + baseline updated |
+
+The baseline is **always updated to the new column set** after drift so the next run compares against the current API shape.
+
+### `SchemaDriftResult`
+
+```python
+@dataclass
+class SchemaDriftResult:
+    endpoint: str
+    previous_columns: Set[str]
+    current_columns: Set[str]
+    added: Set[str]    # current - previous
+    removed: Set[str]  # previous - current
+    has_drift: bool    # property: bool(added or removed)
+```
+
+### `detect_and_alert(bucket, endpoint, records, run_id)`
+
+The main entry point, called automatically from `make_validate_task()` before quality checks. Extracts the union of all keys across `records` (defensive — handles sparse API responses where some columns appear only in certain rows), compares against the stored baseline, and alerts on change.
+
+Returns a `SchemaDriftResult` if drift was found, `None` otherwise.
+
+### Configuration
+
+No extra configuration required. Reuses `COMTRADE_SLACK_WEBHOOK_URL` for alerts and the existing S3 credentials. If the webhook is not set, the alert is suppressed and a warning is logged.

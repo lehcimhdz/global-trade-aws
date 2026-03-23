@@ -20,6 +20,7 @@ from airflow.models import Variable
 from comtrade.callbacks import task_failure_callback
 from comtrade.lineage import emit_task_complete
 from comtrade.metrics import emit_validation_metrics
+from comtrade.schema import detect_and_alert as detect_schema_drift
 from comtrade.s3_writer import build_s3_key, write_json_to_s3, write_parquet_to_s3
 
 logger = logging.getLogger(__name__)
@@ -136,6 +137,22 @@ def make_validate_task(
         ).get_object(Bucket=bucket, Key=json_key)
 
         data = json.loads(obj["Body"].read())
+
+        # Extract records once for schema drift + quality checks.
+        if isinstance(data, list):
+            records = data
+        elif isinstance(data, dict):
+            records = data.get("data", [])
+        else:
+            records = []
+
+        # Schema drift detection — WARNING only, never fails the task.
+        detect_schema_drift(
+            bucket=bucket,
+            endpoint=endpoint,
+            records=records,
+            run_id=context["run_id"],
+        )
 
         logger.info("Running data quality checks for endpoint=%s key=%s", endpoint, json_key)
         results = run_checks(

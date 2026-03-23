@@ -69,6 +69,7 @@ Shared Python library mounted into every Airflow container via the `plugins/` vo
 | `callbacks.py` | Slack alerts, SLA miss notifications, dead-letter S3 manifests |
 | `metrics.py` | CloudWatch custom metric emission after each validation run |
 | `lineage.py` | OpenLineage event emission to Marquez after each task |
+| `schema.py` | Schema drift detection — column-set diff against S3 baseline + Slack alert |
 
 ### DAG files (`dags/`)
 Thin orchestration files — one per API endpoint. They declare schedules, read Airflow Variables, and wire tasks produced by the factory.
@@ -86,7 +87,8 @@ extract_and_store_raw  ──►  validate_bronze  ──►  convert_to_parquet
 
 `convert_to_parquet` is a no-op when `COMTRADE_WRITE_PARQUET` is not `"true"`.
 
-After each task, two cross-cutting side effects fire automatically (never masking task failures):
+After each task, cross-cutting side effects fire automatically (never masking task failures):
+- **Schema drift** — `validate_bronze` compares column sets against a per-endpoint S3 baseline; alerts on change.
 - **CloudWatch metrics** — emitted by `validate_bronze` (row count, check pass/fail, bytes written).
 - **OpenLineage events** — emitted by every task to Marquez when `OPENLINEAGE_URL` is configured.
 
