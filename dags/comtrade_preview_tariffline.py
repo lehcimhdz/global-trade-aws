@@ -15,7 +15,7 @@ from airflow import DAG
 from airflow.models import Variable
 
 from comtrade import client
-from comtrade.dag_factory import make_extract_task, make_parquet_task
+from comtrade.dag_factory import make_extract_task, make_parquet_task, make_validate_task
 
 with DAG(
     dag_id="comtrade_preview_tariffline",
@@ -53,8 +53,15 @@ with DAG(
         freqCode=freqCode,
     )()
 
+    validated = make_validate_task(
+        endpoint="previewTariffline",
+        required_columns=["reporterCode", "period"],
+        numeric_columns=["primaryValue"],
+        dedup_columns=["reporterCode", "partnerCode", "cmdCode", "flowCode", "period", "motCode"],
+    )(json_key=extract)
+
     to_parquet = make_parquet_task(
         endpoint="previewTariffline",
         typeCode=typeCode,
         freqCode=freqCode,
-    )(json_key=extract)
+    )(json_key=validated)

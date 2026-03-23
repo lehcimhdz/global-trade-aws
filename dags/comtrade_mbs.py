@@ -22,7 +22,7 @@ from airflow import DAG
 from airflow.models import Variable
 
 from comtrade import client
-from comtrade.dag_factory import make_extract_task, make_parquet_task
+from comtrade.dag_factory import make_extract_task, make_parquet_task, make_validate_task
 
 with DAG(
     dag_id="comtrade_mbs",
@@ -54,7 +54,12 @@ with DAG(
         extra_partitions={"series_type": series_type},
     )()
 
+    validated = make_validate_task(
+        endpoint="getMBS",
+        freq_code_variable=None,  # MBS uses its own period_type field
+    )(json_key=extract)
+
     to_parquet = make_parquet_task(
         endpoint="getMBS",
         extra_partitions={"series_type": series_type},
-    )(json_key=extract)
+    )(json_key=validated)

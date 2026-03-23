@@ -11,7 +11,7 @@ from datetime import datetime, timedelta
 from airflow import DAG
 
 from comtrade import client
-from comtrade.dag_factory import make_extract_task, make_parquet_task
+from comtrade.dag_factory import make_extract_task, make_parquet_task, make_validate_task
 
 with DAG(
     dag_id="comtrade_releases",
@@ -29,6 +29,11 @@ with DAG(
         api_kwargs_fn=lambda: {},
     )()
 
+    validated = make_validate_task(
+        endpoint="getComtradeReleases",
+        freq_code_variable=None,
+    )(json_key=extract)
+
     to_parquet = make_parquet_task(
         endpoint="getComtradeReleases",
-    )(json_key=extract)
+    )(json_key=validated)

@@ -12,7 +12,7 @@ from airflow import DAG
 from airflow.models import Variable
 
 from comtrade import client
-from comtrade.dag_factory import make_extract_task, make_parquet_task
+from comtrade.dag_factory import make_extract_task, make_parquet_task, make_validate_task
 
 with DAG(
     dag_id="comtrade_metadata",
@@ -42,8 +42,13 @@ with DAG(
         freqCode=freqCode,
     )()
 
+    validated = make_validate_task(
+        endpoint="getMetadata",
+        freq_code_variable=None,  # metadata has no period field
+    )(json_key=extract)
+
     to_parquet = make_parquet_task(
         endpoint="getMetadata",
         typeCode=typeCode,
         freqCode=freqCode,
-    )(json_key=extract)
+    )(json_key=validated)

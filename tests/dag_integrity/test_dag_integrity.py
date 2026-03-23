@@ -4,7 +4,7 @@ DAG integrity tests
 Verifies that all 8 Comtrade DAGs:
   1. Parse and import without errors
   2. Have the expected dag_id, schedule, tags, and catchup setting
-  3. Contain exactly 2 tasks with the correct task IDs
+  3. Contain exactly 3 tasks with the correct task IDs
   4. Have no dependency cycles
 
 These tests use Airflow's DagBag — the same mechanism the scheduler uses to
@@ -34,49 +34,49 @@ EXPECTED_DAGS: dict[str, dict] = {
     "comtrade_preview": {
         "schedule": "@monthly",
         "tags": {"comtrade", "preview", "s3"},
-        "task_ids": {"extract_and_store_raw", "convert_to_parquet"},
+        "task_ids": {"extract_and_store_raw", "validate_bronze", "convert_to_parquet"},
         "catchup": False,
     },
     "comtrade_preview_tariffline": {
         "schedule": "@monthly",
         "tags": {"comtrade", "tariffline", "s3"},
-        "task_ids": {"extract_and_store_raw", "convert_to_parquet"},
+        "task_ids": {"extract_and_store_raw", "validate_bronze", "convert_to_parquet"},
         "catchup": False,
     },
     "comtrade_world_share": {
         "schedule": "@monthly",
         "tags": {"comtrade", "world-share", "s3"},
-        "task_ids": {"extract_and_store_raw", "convert_to_parquet"},
+        "task_ids": {"extract_and_store_raw", "validate_bronze", "convert_to_parquet"},
         "catchup": False,
     },
     "comtrade_metadata": {
         "schedule": "@weekly",
         "tags": {"comtrade", "metadata", "s3"},
-        "task_ids": {"extract_and_store_raw", "convert_to_parquet"},
+        "task_ids": {"extract_and_store_raw", "validate_bronze", "convert_to_parquet"},
         "catchup": False,
     },
     "comtrade_mbs": {
         "schedule": "@monthly",
         "tags": {"comtrade", "mbs", "s3"},
-        "task_ids": {"extract_and_store_raw", "convert_to_parquet"},
+        "task_ids": {"extract_and_store_raw", "validate_bronze", "convert_to_parquet"},
         "catchup": False,
     },
     "comtrade_da_tariffline": {
         "schedule": "@monthly",
         "tags": {"comtrade", "da", "tariffline", "s3"},
-        "task_ids": {"extract_and_store_raw", "convert_to_parquet"},
+        "task_ids": {"extract_and_store_raw", "validate_bronze", "convert_to_parquet"},
         "catchup": False,
     },
     "comtrade_da": {
         "schedule": "@monthly",
         "tags": {"comtrade", "da", "s3"},
-        "task_ids": {"extract_and_store_raw", "convert_to_parquet"},
+        "task_ids": {"extract_and_store_raw", "validate_bronze", "convert_to_parquet"},
         "catchup": False,
     },
     "comtrade_releases": {
         "schedule": "@daily",
         "tags": {"comtrade", "releases", "s3"},
-        "task_ids": {"extract_and_store_raw", "convert_to_parquet"},
+        "task_ids": {"extract_and_store_raw", "validate_bronze", "convert_to_parquet"},
         "catchup": False,
     },
 }
@@ -197,13 +197,30 @@ class TestDagTasks:
         )
 
     @pytest.mark.parametrize("dag_id", EXPECTED_DAGS)
-    def test_parquet_depends_on_extract(self, dagbag, dag_id):
-        """convert_to_parquet must have extract_and_store_raw as upstream."""
+    def test_validate_task_exists(self, dagbag, dag_id):
+        dag = dagbag.get_dag(dag_id)
+        assert dag.has_task("validate_bronze"), (
+            f"{dag_id}: missing task 'validate_bronze'"
+        )
+
+    @pytest.mark.parametrize("dag_id", EXPECTED_DAGS)
+    def test_validate_depends_on_extract(self, dagbag, dag_id):
+        """validate_bronze must have extract_and_store_raw as upstream."""
+        dag = dagbag.get_dag(dag_id)
+        validate_task = dag.get_task("validate_bronze")
+        upstream_ids = {t.task_id for t in validate_task.upstream_list}
+        assert "extract_and_store_raw" in upstream_ids, (
+            f"{dag_id}: 'validate_bronze' must depend on 'extract_and_store_raw'"
+        )
+
+    @pytest.mark.parametrize("dag_id", EXPECTED_DAGS)
+    def test_parquet_depends_on_validate(self, dagbag, dag_id):
+        """convert_to_parquet must have validate_bronze as upstream."""
         dag = dagbag.get_dag(dag_id)
         parquet_task = dag.get_task("convert_to_parquet")
         upstream_ids = {t.task_id for t in parquet_task.upstream_list}
-        assert "extract_and_store_raw" in upstream_ids, (
-            f"{dag_id}: 'convert_to_parquet' must depend on 'extract_and_store_raw'"
+        assert "validate_bronze" in upstream_ids, (
+            f"{dag_id}: 'convert_to_parquet' must depend on 'validate_bronze'"
         )
 
     @pytest.mark.parametrize("dag_id", EXPECTED_DAGS)
