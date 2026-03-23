@@ -17,9 +17,11 @@ from unittest import mock
 import pytest
 
 from comtrade.callbacks import (
+    _build_sla_miss_payload,
     _build_task_failure_payload,
     _get_webhook_url,
     _post_slack,
+    sla_miss_callback,
     task_failure_callback,
 )
 
@@ -195,6 +197,128 @@ class TestPostSlack:
             with caplog.at_level(logging.ERROR, logger="comtrade.callbacks"):
                 _post_slack({"blocks": []}, "https://hooks.slack.com/test")
         assert any("500" in r.message for r in caplog.records)
+
+
+# ── _build_sla_miss_payload ───────────────────────────────────────────────────
+
+
+class TestBuildSlaMissPayload:
+    def _make_dag(self, dag_id="comtrade_preview"):
+        dag = mock.Mock()
+        dag.dag_id = dag_id
+        return dag
+
+    def _make_sla(self, execution_date="2024-01-01"):
+        sla = mock.Mock()
+        sla.execution_date = execution_date
+        return sla
+
+    def test_returns_dict_with_blocks(self):
+        payload = _build_sla_miss_payload(self._make_dag(), ["task_a"], [], [], [])
+        assert "blocks" in payload
+        assert isinstance(payload["blocks"], list)
+
+    def test_header_contains_sla_miss_text(self):
+        payload = _build_sla_miss_payload(self._make_dag(), [], [], [], [])
+        header = payload["blocks"][0]
+        assert "SLA" in header["text"]["text"]
+
+    def test_dag_id_in_fields(self):
+        payload = _build_sla_miss_payload(self._make_dag("comtrade_mbs"), [], [], [], [])
+        section = payload["blocks"][1]
+        fields_text = " ".join(f["text"] for f in section["fields"])
+        assert "comtrade_mbs" in fields_text
+
+    def test_missed_tasks_in_fields(self):
+        payload = _build_sla_miss_payload(
+            self._make_dag(), ["extract_and_store_raw", "validate_bronze"], [], [], []
+        )
+        section = payload["blocks"][1]
+        fields_text = " ".join(f["text"] for f in section["fields"])
+        assert "extract_and_store_raw" in fields_text
+        assert "validate_bronze" in fields_text
+
+    def test_blocking_tasks_in_fields(self):
+        payload = _build_sla_miss_payload(
+            self._make_dag(), [], ["convert_to_parquet"], [], []
+        )
+        section = payload["blocks"][1]
+        fields_text = " ".join(f["text"] for f in section["fields"])
+        assert "convert_to_parquet" in fields_text
+
+    def test_execution_date_extracted_from_slas(self):
+        sla = self._make_sla("2024-06-01")
+        payload = _build_sla_miss_payload(self._make_dag(), [], [], [sla], [])
+        section = payload["blocks"][1]
+        fields_text = " ".join(f["text"] for f in section["fields"])
+        assert "2024-06-01" in fields_text
+
+    def test_empty_task_list_shows_unknown(self):
+        payload = _build_sla_miss_payload(self._make_dag(), [], [], [], [])
+        section = payload["blocks"][1]
+        fields_text = " ".join(f["text"] for f in section["fields"])
+        assert "unknown" in fields_text
+
+    def test_empty_blocking_list_shows_none(self):
+        payload = _build_sla_miss_payload(self._make_dag(), [], [], [], [])
+        section = payload["blocks"][1]
+        fields_text = " ".join(f["text"] for f in section["fields"])
+        assert "none" in fields_text
+
+    def test_slas_without_execution_date_attr_handled(self):
+        sla = mock.Mock(spec=[])  # no attributes
+        payload = _build_sla_miss_payload(self._make_dag(), [], [], [sla], [])
+        section = payload["blocks"][1]
+        fields_text = " ".join(f["text"] for f in section["fields"])
+        assert "unknown" in fields_text
+
+
+# ── sla_miss_callback ─────────────────────────────────────────────────────────
+
+
+class TestSlaMissCallback:
+    def _make_dag(self, dag_id="comtrade_preview"):
+        dag = mock.Mock()
+        dag.dag_id = dag_id
+        return dag
+
+    def test_skips_when_no_webhook_url(self, caplog):
+        import logging
+
+        with mock.patch("comtrade.callbacks._get_webhook_url", return_value=None):
+            with caplog.at_level(logging.WARNING, logger="comtrade.callbacks"):
+                sla_miss_callback(self._make_dag(), [], [], [], [])
+        assert any("not configured" in r.message for r in caplog.records)
+
+    def test_posts_when_webhook_configured(self):
+        with mock.patch("comtrade.callbacks._get_webhook_url", return_value="https://hooks.slack.com/x"):
+            with mock.patch("comtrade.callbacks._post_slack") as mock_post:
+                sla_miss_callback(self._make_dag(), ["extract_and_store_raw"], [], [], [])
+        mock_post.assert_called_once()
+        payload, url = mock_post.call_args[0]
+        assert "blocks" in payload
+        assert url == "https://hooks.slack.com/x"
+
+    def test_notification_error_does_not_propagate(self):
+        with mock.patch("comtrade.callbacks._get_webhook_url", return_value="https://hooks.slack.com/x"):
+            with mock.patch("comtrade.callbacks._post_slack", side_effect=RuntimeError("timeout")):
+                sla_miss_callback(self._make_dag(), [], [], [], [])  # must not raise
+
+    def test_dag_id_in_slack_payload(self):
+        with mock.patch("comtrade.callbacks._get_webhook_url", return_value="https://hooks.slack.com/x"):
+            with mock.patch("comtrade.callbacks._post_slack") as mock_post:
+                sla_miss_callback(self._make_dag("comtrade_releases"), [], [], [], [])
+        payload = mock_post.call_args[0][0]
+        assert "comtrade_releases" in json.dumps(payload)
+
+    def test_logs_success_after_post(self, caplog):
+        import logging
+
+        with mock.patch("comtrade.callbacks._get_webhook_url", return_value="https://hooks.slack.com/x"):
+            with mock.patch("comtrade.callbacks._post_slack"):
+                with caplog.at_level(logging.INFO, logger="comtrade.callbacks"):
+                    sla_miss_callback(self._make_dag(), [], [], [], [])
+        assert any("SLA miss alert sent" in r.message for r in caplog.records)
 
 
 # ── task_failure_callback ─────────────────────────────────────────────────────

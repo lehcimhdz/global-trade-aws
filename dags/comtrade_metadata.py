@@ -12,6 +12,7 @@ from airflow import DAG
 from airflow.models import Variable
 
 from comtrade import client
+from comtrade.callbacks import sla_miss_callback
 from comtrade.dag_factory import make_extract_task, make_parquet_task, make_validate_task
 
 with DAG(
@@ -20,7 +21,8 @@ with DAG(
     schedule="@weekly",
     start_date=datetime(2024, 1, 1),
     catchup=False,
-    default_args={"retries": 2, "retry_delay": timedelta(minutes=5)},
+    default_args={"retries": 2, "retry_delay": timedelta(minutes=5), "sla": timedelta(hours=4)},
+    sla_miss_callback=sla_miss_callback,
     tags=["comtrade", "metadata", "s3"],
 ) as dag:
 

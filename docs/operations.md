@@ -137,6 +137,40 @@ docker compose down -v
 
 ---
 
+## Alerting
+
+### Slack failure notifications
+
+Every task in every DAG sends a Slack message when it fails (after all retries are exhausted). The message includes the DAG ID, task ID, run ID, execution date, the exception message, and a direct link to the task log.
+
+**Setup:**
+
+1. Create a Slack Incoming Webhook at <https://api.slack.com/messaging/webhooks>.
+2. Add the URL to `.env`:
+   ```dotenv
+   COMTRADE_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
+   ```
+3. Push to Secrets Manager:
+   ```bash
+   make bootstrap-secrets ENV=dev
+   ```
+
+If the variable is not set the callbacks log a warning and return silently — local development works without a Slack workspace.
+
+### SLA miss notifications
+
+Each DAG has an SLA window based on its schedule. If the pipeline hasn't completed within that window after the scheduled execution date, Airflow fires a Slack SLA miss alert listing which tasks missed and which are blocking.
+
+| Schedule | SLA window |
+|----------|-----------|
+| `@monthly` | 8 hours |
+| `@weekly` | 4 hours |
+| `@daily` | 2 hours |
+
+The same `COMTRADE_SLACK_WEBHOOK_URL` variable is used for SLA alerts.
+
+---
+
 ## Monitoring
 
 ### Airflow UI dashboards

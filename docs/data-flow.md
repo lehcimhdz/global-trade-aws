@@ -22,9 +22,26 @@ Airflow Scheduler
       │          ▼
       │    S3: comtrade/<endpoint>/type=X/freq=Y/year=YYYY/month=MM/<run_id>.json
       │
-      └─── Task 2: convert_to_parquet   (skipped if COMTRADE_WRITE_PARQUET != "true")
+      ├─── Task 2: validate_bronze
+      │          │
+      │          │  1. Read S3 key from XCom (output of Task 1)
+      │          │  2. GET JSON from S3
+      │          │  3. Run check suite (validator.run_checks):
+      │          │       • check_envelope       — response is dict or list
+      │          │       • check_has_data_key   — dict has a 'data' list
+      │          │       • check_row_count       — at least 1 record
+      │          │       • check_no_nulls        — required columns non-null
+      │          │       • check_numeric_non_negative — numeric columns ≥ 0 (WARNING)
+      │          │       • check_period_format   — period matches freq code (A/M)
+      │          │       • check_no_duplicates   — no repeated natural keys (WARNING)
+      │          │  4. Log all results; raise DataQualityError on any ERROR failure
+      │          │  5. Return same S3 key → XCom (pass-through)
+      │          ▼
+      │    (no new S3 object — validates the bronze JSON in place)
+      │
+      └─── Task 3: convert_to_parquet   (skipped if COMTRADE_WRITE_PARQUET != "true")
                  │
-                 │  1. Read S3 key from XCom (output of Task 1)
+                 │  1. Read S3 key from XCom (output of Task 2)
                  │  2. GET JSON object from S3
                  │  3. Extract response["data"] array
                  │  4. pd.json_normalize(records) → DataFrame
@@ -101,10 +118,15 @@ extract_and_store_raw
         │  returns: S3 key string
         │  stored in: XCom (key="return_value")
         ▼
+validate_bronze(json_key=<XCom value>)
+        │
+        │  returns: same S3 key string (pass-through)
+        │  stored in: XCom (key="return_value")
+        ▼
 convert_to_parquet(json_key=<XCom value>)
 ```
 
-The `json_key` argument in `convert_to_parquet` is automatically resolved from XCom by the Airflow TaskFlow API (`@task` decorator).
+The `json_key` argument in each downstream task is automatically resolved from XCom by the Airflow TaskFlow API (`@task` decorator). `validate_bronze` returns the same key it received so the Parquet task can use it unchanged.
 
 ---
 
@@ -115,8 +137,12 @@ The `json_key` argument in `convert_to_parquet` is automatically resolved from X
 | HTTP transport | `urllib3.Retry` | 3 retries, backoff×2, on 429/5xx |
 | Task execution | Airflow `retries` | 2 retries, 5-minute delay |
 | Rate limiting | `time.sleep(1.1)` | Applied before every API request |
+| Data quality (ERROR) | `DataQualityError` raised | Fails task; triggers Slack alert |
+| Data quality (WARNING) | Logged, pipeline continues | Duplicates, negative values |
 | Empty data | Log warning, return `None` | Parquet task only |
 | HTTP 4xx (non-429) | Raised immediately | No retry (client error) |
+| Task failure | `on_failure_callback` | Slack notification on every task |
+| SLA miss | `sla_miss_callback` | Slack notification when DAG exceeds SLA window |
 
 ---
 

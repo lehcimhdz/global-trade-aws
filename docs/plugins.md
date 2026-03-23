@@ -12,7 +12,9 @@ plugins/
     ├── __init__.py       — package marker
     ├── client.py         — HTTP client for the Comtrade API
     ├── s3_writer.py      — S3 upload utilities
-    └── dag_factory.py    — @task factory functions shared by all DAGs
+    ├── dag_factory.py    — @task factory functions shared by all DAGs
+    ├── validator.py      — Pure-Python data quality checks (no Airflow dependency)
+    └── callbacks.py      — Slack failure and SLA miss notifications
 ```
 
 ---
@@ -127,7 +129,7 @@ AWS_DEFAULT_REGION     → Airflow Variable (default: us-east-1)
 
 ### Purpose
 
-Generates the two standard `@task` functions that every DAG in this project needs. Using a factory avoids copy-pasting identical task bodies across 8 DAG files.
+Generates the three standard `@task` functions that every DAG in this project needs. Using a factory avoids copy-pasting identical task bodies across 8 DAG files.
 
 ### `make_extract_task()`
 
@@ -153,6 +155,28 @@ Returns an `@task(task_id="extract_and_store_raw")` function. When Airflow execu
 
 **Why `api_kwargs_fn` instead of passing kwargs directly?**
 Airflow evaluates DAG-level code at parse time (every ~30 seconds). `Variable.get()` called at parse time would hit the database on every parse cycle. Wrapping Variable reads in a lambda defers them to task execution time, reducing database load and avoiding errors when Variables don't exist yet.
+
+### `make_validate_task()`
+
+```python
+def make_validate_task(
+    endpoint: str,
+    required_columns: Optional[List[str]] = None,
+    numeric_columns: Optional[List[str]] = None,
+    dedup_columns: Optional[List[str]] = None,
+    min_rows: int = 1,
+    freq_code_variable: Optional[str] = "COMTRADE_FREQ_CODE",
+) -> Callable
+```
+
+Returns an `@task(task_id="validate_bronze")` function. When executed:
+
+1. Downloads the bronze JSON from S3 using the key passed via XCom.
+2. Calls `validator.run_checks()` with the per-DAG check configuration.
+3. Calls `validator.assert_quality()` — logs all results; raises `DataQualityError` on any ERROR-severity failure.
+4. Returns the same S3 key as a pass-through for the parquet task.
+
+`freq_code_variable` controls whether period-format validation runs. Set to `None` for endpoints that don't have a `period` field (metadata, releases, MBS).
 
 ### `make_parquet_task()`
 
@@ -180,9 +204,15 @@ Returns an `@task(task_id="convert_to_parquet")` function. When executed:
 # dags/comtrade_preview.py (simplified)
 
 from comtrade import client
-from comtrade.dag_factory import make_extract_task, make_parquet_task
+from comtrade.callbacks import sla_miss_callback
+from comtrade.dag_factory import make_extract_task, make_parquet_task, make_validate_task
 
-with DAG("comtrade_preview", ...) as dag:
+with DAG(
+    "comtrade_preview",
+    default_args={"retries": 2, "retry_delay": timedelta(minutes=5), "sla": timedelta(hours=8)},
+    sla_miss_callback=sla_miss_callback,
+    ...
+) as dag:
 
     def _api_kwargs():          # lambda — evaluated at task runtime
         return dict(
@@ -196,13 +226,96 @@ with DAG("comtrade_preview", ...) as dag:
         api_kwargs_fn=_api_kwargs,
         typeCode=Variable.get("COMTRADE_TYPE_CODE", default_var="C"),
         freqCode=Variable.get("COMTRADE_FREQ_CODE", default_var="A"),
-    )()                          # ← call returns the decorated task
+    )()
+
+    validated = make_validate_task(
+        endpoint="preview",
+        required_columns=["reporterCode", "period"],
+        numeric_columns=["primaryValue"],
+        dedup_columns=["reporterCode", "partnerCode", "cmdCode", "flowCode", "period"],
+    )(json_key=extract)          # ← XCom dependency wired automatically
 
     to_parquet = make_parquet_task(
         endpoint="preview",
         typeCode=...,
         freqCode=...,
-    )(json_key=extract)          # ← XCom dependency wired automatically
+    )(json_key=validated)        # ← receives key from validate, not extract
 ```
 
-The `(json_key=extract)` call passes the output of `extract` as an XCom input — the TaskFlow API (`@task`) handles the dependency implicitly.
+The TaskFlow API (`@task`) resolves XCom dependencies implicitly from the function arguments.
+
+---
+
+## `validator.py`
+
+### Purpose
+
+Pure-Python data quality checks with no Airflow dependency. Because it imports nothing from Airflow it can be unit-tested without an Airflow installation.
+
+### Check functions
+
+| Function | Severity | What it checks |
+|----------|----------|----------------|
+| `check_envelope` | ERROR | Response is a `dict` or `list` |
+| `check_has_data_key` | ERROR | Dict has a `data` key containing a list |
+| `check_row_count` | ERROR | At least `min_rows` records present |
+| `check_no_nulls` | ERROR | Required columns have no null/empty values |
+| `check_numeric_non_negative` | WARNING | Numeric columns are ≥ 0 |
+| `check_period_format` | ERROR | Period values match `YYYY` (annual) or `YYYYMM` (monthly) |
+| `check_no_duplicates` | WARNING | No duplicate natural key combinations |
+
+### `run_checks(data, ...)` → `List[CheckResult]`
+
+Runs the full suite and returns all results regardless of pass/fail. The caller decides what to do with them.
+
+### `assert_quality(results)`
+
+Logs every result and raises `DataQualityError` if any ERROR-severity check failed. WARNING failures are logged but do not raise.
+
+### `CheckResult` and `Severity`
+
+```python
+class Severity(str, Enum):
+    ERROR = "error"    # fails the DAG run
+    WARNING = "warning"  # logged only
+
+@dataclass
+class CheckResult:
+    name: str
+    passed: bool
+    message: str
+    severity: Severity = Severity.ERROR
+    details: Dict[str, Any] = field(default_factory=dict)
+```
+
+---
+
+## `callbacks.py`
+
+### Purpose
+
+Sends Slack notifications on task failure and SLA misses. Uses only Python stdlib (`urllib.request`) — no extra dependencies. All Airflow imports are lazy so the module can be imported and tested without Airflow.
+
+### `task_failure_callback(context)`
+
+Airflow `on_failure_callback`. Automatically attached to every task via the `@task` decorator in `dag_factory.py`. Posts a Slack Block Kit message with the DAG ID, task ID, run ID, execution date, exception snippet, and a direct link to the task log.
+
+### `sla_miss_callback(dag, task_list, blocking_task_list, slas, blocking_tis)`
+
+Airflow `sla_miss_callback`. Set on each DAG definition. Posts a Slack message listing the missed tasks, blocking tasks, and execution dates.
+
+### Resilience
+
+Both callbacks follow the same pattern:
+- If `COMTRADE_SLACK_WEBHOOK_URL` is not set, a warning is logged and the function returns silently (local dev works without a Slack workspace).
+- Any exception during the HTTP POST is caught and logged — notification failures never mask the original task failure.
+
+### Configuration
+
+Set `COMTRADE_SLACK_WEBHOOK_URL` in `.env` (populated to AWS Secrets Manager via `make bootstrap-secrets`):
+
+```dotenv
+COMTRADE_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
+```
+
+Create a webhook at <https://api.slack.com/messaging/webhooks>.

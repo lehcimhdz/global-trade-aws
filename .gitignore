@@ -2,16 +2,38 @@
 .env
 
 # ── Python ────────────────────────────────────
-logs/
 __pycache__/
 *.pyc
 *.pyo
+*.pyd
+*.egg-info/
+*.egg
+dist/
+build/
+.venv/
+venv/
+env/
+
+# ── Type checking / linting caches ────────────
+.mypy_cache/
+.ruff_cache/
+.dmypy.json
+
+# ── Test artefacts ────────────────────────────
 .pytest_cache/
-htmlcov/
 .coverage
 coverage.xml
-*.egg-info/
-.venv/
+htmlcov/
+tests/.airflow_test.db
+tests/.airflow_home/
+
+# ── Airflow ───────────────────────────────────
+logs/
+airflow.db
+airflow.cfg
+webserver_config.py
+standalone_admin_password.txt
+unittests.cfg
 
 # ── Terraform ─────────────────────────────────
 terraform/.terraform/
@@ -23,11 +45,19 @@ terraform/environments/*.tfvars.backup
 
 # ── Secrets ───────────────────────────────────
 .secrets.baseline
+*.pem
+*.key
 
 # ── OS ────────────────────────────────────────
 .DS_Store
-.claude
+Thumbs.db
 
-# ── Test artefacts ────────────────────────────
-tests/.airflow_test.db
-tests/.airflow_home/
+# ── IDE ───────────────────────────────────────
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# ── Claude Code ───────────────────────────────
+.claude/
+ROADMAP.md

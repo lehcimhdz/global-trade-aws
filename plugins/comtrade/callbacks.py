@@ -116,6 +116,95 @@ def _build_task_failure_payload(context: Dict[str, Any]) -> Dict[str, Any]:
 # ── Public callbacks ──────────────────────────────────────────────────────────
 
 
+def _build_sla_miss_payload(
+    dag: Any,
+    task_list: Any,
+    blocking_task_list: Any,
+    slas: Any,
+    blocking_tis: Any,
+) -> Dict[str, Any]:
+    """
+    Build a Slack Block Kit payload from Airflow SLA miss arguments.
+
+    Exposed as a standalone function so it can be tested without I/O.
+    The parameters mirror Airflow's ``sla_miss_callback`` signature exactly.
+    """
+    dag_id = dag.dag_id if hasattr(dag, "dag_id") else str(dag)
+
+    missed = ", ".join(f"`{t}`" for t in (task_list or [])) or "unknown"
+    blocking = ", ".join(f"`{t}`" for t in (blocking_task_list or [])) or "none"
+
+    exec_dates: list[str] = []
+    for sla in slas or []:
+        if hasattr(sla, "execution_date"):
+            exec_dates.append(str(sla.execution_date))
+    exec_info = ", ".join(exec_dates) if exec_dates else "unknown"
+
+    return {
+        "blocks": [
+            {
+                "type": "header",
+                "text": {
+                    "type": "plain_text",
+                    "text": ":warning: Comtrade SLA Miss",
+                    "emoji": True,
+                },
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*DAG:*\n`{dag_id}`"},
+                    {"type": "mrkdwn", "text": f"*Missed Tasks:*\n{missed}"},
+                    {"type": "mrkdwn", "text": f"*Blocking Tasks:*\n{blocking}"},
+                    {"type": "mrkdwn", "text": f"*Execution Date(s):*\n{exec_info}"},
+                ],
+            },
+            {
+                "type": "section",
+                "text": {
+                    "type": "mrkdwn",
+                    "text": ":clock1: One or more tasks did not complete within their SLA window.",
+                },
+            },
+        ]
+    }
+
+
+def sla_miss_callback(
+    dag: Any,
+    task_list: Any,
+    blocking_task_list: Any,
+    slas: Any,
+    blocking_tis: Any,
+) -> None:
+    """
+    Airflow ``sla_miss_callback`` for DAGs.
+
+    Add to the DAG definition:
+
+        with DAG(..., sla_miss_callback=sla_miss_callback) as dag: ...
+
+    And set a per-task SLA in ``default_args``:
+
+        default_args = {"sla": timedelta(hours=8), ...}
+    """
+    webhook_url = _get_webhook_url()
+    if not webhook_url:
+        dag_id = dag.dag_id if hasattr(dag, "dag_id") else str(dag)
+        logger.warning(
+            "COMTRADE_SLACK_WEBHOOK_URL not configured — SLA miss alert suppressed for %s",
+            dag_id,
+        )
+        return
+
+    try:
+        payload = _build_sla_miss_payload(dag, task_list, blocking_task_list, slas, blocking_tis)
+        _post_slack(payload, webhook_url)
+        logger.info("Slack SLA miss alert sent.")
+    except Exception as exc:
+        logger.error("Failed to send Slack SLA miss alert: %s", exc)
+
+
 def task_failure_callback(context: Dict[str, Any]) -> None:
     """
     Airflow ``on_failure_callback`` for tasks.
