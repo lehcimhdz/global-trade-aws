@@ -2,16 +2,17 @@
 
 ## Overview
 
-The test suite is split into two tiers:
+The test suite is split into three tiers:
 
 | Tier | Location | Airflow required | Coverage |
 |------|----------|-----------------|----------|
-| **Unit** | `tests/unit/` | Only for S3 and DAG factory tests | API client, S3 key builder, upload helpers, task factory logic |
-| **DAG integrity** | `tests/dag_integrity/` | Yes | All 8 DAGs parse cleanly, correct structure and schedules |
+| **Unit** | `tests/unit/` | Only for S3 / DAG factory / callbacks | API client, writers, validator, schema drift, Iceberg, metrics, lineage, callbacks, dbt project structure |
+| **DAG integrity** | `tests/dag_integrity/` | Yes | All 9 DAGs (8 ingestion + `comtrade_dbt`) parse cleanly, correct structure and schedules |
+| **Integration smoke** | `tests/integration/` | Yes | Multi-component end-to-end: bronze → validate → parquet → schema drift → dead-letter, against moto S3 |
 
 Tests that depend on Airflow are automatically **skipped** (not failed) when
 `apache-airflow` is not installed in the current environment. The pure-Python
-API client tests always run.
+API client tests and dbt project structure tests always run.
 
 ---
 
@@ -57,11 +58,20 @@ pytest tests/unit/ -v
 pytest tests/dag_integrity/ -v
 ```
 
+### Only integration smoke tests
+
+```bash
+pytest tests/integration/ -v
+# or with the make target:
+make test-integration
+```
+
 ### By marker
 
 ```bash
 pytest -m unit            # pure unit tests
 pytest -m dag_integrity   # structural DAG tests
+pytest -m integration     # multi-component smoke tests
 ```
 
 ### With coverage
@@ -76,16 +86,26 @@ pytest --cov=comtrade --cov-report=term-missing
 
 ```
 tests/
-├── conftest.py                     # sys.path setup, env vars, sample_api_response fixture
+├── conftest.py                     # sys.path, env vars, sample_api_response fixture
 ├── requirements-test.txt           # test-only dependencies
 ├── unit/
 │   ├── conftest.py                 # mock_variables fixture, Airflow DB init
 │   ├── test_client.py              # HTTP client (no Airflow dependency)
 │   ├── test_s3_writer.py           # S3 key builder + upload helpers (moto)
-│   └── test_dag_factory.py         # extract/parquet task logic
-└── dag_integrity/
-    ├── conftest.py                 # Airflow DB init for DAG loading
-    └── test_dag_integrity.py       # DagBag structure assertions
+│   ├── test_dag_factory.py         # extract/validate/parquet task logic
+│   ├── test_validator.py           # 7-check quality suite
+│   ├── test_callbacks.py           # Slack alerts, dead-letter, SLA miss
+│   ├── test_metrics.py             # CloudWatch metric builder
+│   ├── test_lineage.py             # OpenLineage event builder
+│   ├── test_schema.py              # Schema drift detection
+│   ├── test_iceberg.py             # Iceberg writer (sys.modules mock for pyiceberg)
+│   └── test_dbt_project.py         # dbt YAML structure + SQL coverage (no dbt needed)
+├── dag_integrity/
+│   ├── conftest.py                 # Airflow DB init for DAG loading
+│   └── test_dag_integrity.py       # DagBag structure for all 9 DAGs
+└── integration/
+    ├── conftest.py                 # mock_variables + moto S3 bucket fixtures
+    └── test_pipeline_smoke.py      # multi-component end-to-end tests
 ```
 
 ---
@@ -123,15 +143,27 @@ tests/
 | `TestExtractTask` | API function is called with kwargs from `api_kwargs_fn`; returns S3 key string; key contains endpoint, year, month; `run_id` colons/plus-signs sanitised; correct bucket used; API response forwarded to writer; extra partitions in key |
 | `TestParquetTask` | Returns `None` when disabled; no S3 read when disabled; reads JSON from correct S3 key; extracts `data[]` from envelope; returns `None` for empty data; returns `None` for non-list data; Parquet key contains `fmt=parquet`; bare list response used as-is |
 
-### `test_dag_integrity.py` (40 tests, requires Airflow)
+### `test_dag_integrity.py` (requires Airflow)
 
 | Class | What is verified |
 |-------|-----------------|
-| `TestDagBagLoads` | Zero import errors; all 8 DAGs present; no unexpected DAGs |
+| `TestDagBagLoads` | Zero import errors; all 9 DAGs present; no unexpected DAGs |
 | `TestDagSchedule` | Each DAG's schedule matches expected value |
-| `TestDagConfig` | `catchup=False` on all DAGs; tags match exactly; description is non-empty; `default_args.retries >= 1`; `start_date` is set |
-| `TestDagTasks` | Exactly 2 tasks per DAG; correct task IDs; `extract_and_store_raw` present; `convert_to_parquet` present; parquet task depends on extract task; no dependency cycles |
-| `TestDagFiles` | All 8 DAG files exist on disk; plugin `__init__.py` exists |
+| `TestDagConfig` | `catchup=False` on all DAGs; tags match exactly; description non-empty; `retries >= 1`; `start_date` set |
+| `TestDagTasks` | Correct task count per DAG; correct task IDs; dependency chain correct; no cycles |
+| `TestDagFiles` | All 9 DAG files on disk; plugin `__init__.py` exists |
+| `TestDbtDag` | `comtrade_dbt` has 4 tasks; deps → staging → silver → test dependency chain; no cycles |
+
+### `test_pipeline_smoke.py` (32 tests, requires Airflow + moto)
+
+| Class | What is verified |
+|-------|-----------------|
+| `TestBronzeWriteAndRead` | Hive-partitioned key; object exists; Content-Type; record count/values/columns preserved on round-trip; Unicode characters survive serialisation |
+| `TestValidationPipeline` | All 7 checks pass on valid S3 data; `check_envelope` passes; `check_has_data_key` passes; `check_row_count` passes; bad envelope fails; empty data fails |
+| `TestParquetPipeline` | Parquet written to S3; key has `fmt=parquet/`; column names preserved; numeric values preserved (approx) |
+| `TestSchemaDriftPipeline` | First run saves baseline to S3; second run same schema → no drift; added column → drift detected; removed column → drift detected; baseline updated after drift; endpoints have independent baselines; empty records skips detection |
+| `TestDeadLetterPipeline` | Manifest object exists in S3; key contains `dag_id=` and `task_id=`; manifest is valid JSON; required fields present; exception message captured |
+| `TestFullPipelineChain` | Extract → validate → parquet in sequence; extract → schema drift across three runs |
 
 ---
 
@@ -151,6 +183,9 @@ The task factory returns Airflow `@task`-decorated objects. The underlying Pytho
 
 ### Airflow DB (dag_integrity tests)
 `airflow.utils.db.initdb()` creates a SQLite database at `tests/.airflow_test.db` once per session. The `DagBag` uses this DB to resolve imports.
+
+### Integration tests (multi-component)
+Integration tests combine all of the above — real `moto` S3 objects are written and read across multiple modules. No S3 calls are mocked at the function level; `mock_aws()` intercepts boto3 at the transport layer so the full serialization/deserialization path runs. Airflow Variables are patched via `monkeypatch`. `pyiceberg` is excluded from integration scope (covered by unit tests with `sys.modules` injection).
 
 ---
 

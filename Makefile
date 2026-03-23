@@ -65,6 +65,10 @@ test: ## Run the always-available client unit tests (no Airflow required)
 test-full: ## Run the complete test suite (requires Airflow installed)
 	pytest tests/ -v --tb=short
 
+.PHONY: test-integration
+test-integration: ## Run integration smoke tests (requires Airflow + moto)
+	pytest tests/integration/ -v --tb=short -m integration
+
 .PHONY: test-cov
 test-cov: ## Run full suite with HTML coverage report
 	pytest tests/ -v --cov=comtrade --cov-report=term-missing --cov-report=html:htmlcov

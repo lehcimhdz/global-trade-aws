@@ -5,8 +5,8 @@ pytest-mock>=3.12.0
 # ── HTTP mocking (for client.py tests) ────────────────────────────────────────
 responses>=0.25.0
 
-# ── AWS mocking (for s3_writer.py tests) ──────────────────────────────────────
-moto[s3]>=5.0.0
+# ── AWS mocking (for s3_writer.py tests and integration smoke tests) ──────────
+moto[s3,glue]>=5.0.0
 
 # ── Extras for Parquet tests ──────────────────────────────────────────────────
 pandas>=2.2.0
