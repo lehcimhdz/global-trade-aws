@@ -1,0 +1,60 @@
+version: 2
+
+sources:
+  - name: bronze
+    description: >
+      Apache Iceberg tables written by the Comtrade Airflow pipeline.
+      Each table corresponds to one API endpoint; data files live in
+      s3://<bucket>/iceberg/<endpoint>/ and metadata is registered in
+      the AWS Glue Data Catalog under the "comtrade" database.
+    database: comtrade
+    schema: comtrade
+    tables:
+      - name: preview
+        description: >
+          Trade flow records from the /preview endpoint. Each row represents
+          one commodity-flow-reporter-partner combination for a given period.
+        columns:
+          - name: reportercode
+            description: UN numeric code for the reporting country
+            tests:
+              - not_null
+          - name: partnercode
+            description: UN numeric code for the partner country
+            tests:
+              - not_null
+          - name: cmdcode
+            description: Commodity code (HS or SITC depending on clCode)
+          - name: flowcode
+            description: Trade flow direction — M (Import) or X (Export)
+            tests:
+              - not_null
+              - accepted_values:
+                  values: ["M", "X", "Re-Import", "Re-Export"]
+          - name: primaryvalue
+            description: Trade value in USD
+          - name: period
+            description: Reporting period — YYYY (annual) or YYYYMM (monthly)
+            tests:
+              - not_null
+
+      - name: previewtariffline
+        description: >
+          Tariff-line level trade data from /previewTariffline. More granular
+          than /preview — includes individual tariff line codes.
+        columns:
+          - name: reportercode
+            tests:
+              - not_null
+          - name: period
+            tests:
+              - not_null
+
+      - name: getmbs
+        description: >
+          Monthly Bulletin of Statistics time-series data from /getMBS.
+          Covers broad macroeconomic trade indicators.
+        columns:
+          - name: period
+            tests:
+              - not_null

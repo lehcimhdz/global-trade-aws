@@ -1,0 +1,73 @@
+version: 2
+
+models:
+  - name: stg_preview
+    description: >
+      Typed and renamed trade flow records from the Comtrade /preview endpoint.
+      One row per commodity-flow-reporter-partner-period combination.
+    columns:
+      - name: reporter_code
+        description: UN numeric code for the reporting country
+        tests:
+          - not_null
+      - name: reporter_iso
+        description: ISO 3-letter country code of the reporter
+      - name: reporter_name
+        description: Full country name of the reporter
+      - name: partner_code
+        description: UN numeric code for the partner country
+        tests:
+          - not_null
+      - name: partner_iso
+        description: ISO 3-letter country code of the partner
+      - name: partner_name
+        description: Full country name of the partner
+      - name: commodity_code
+        description: Commodity classification code (HS, SITC, etc.)
+      - name: commodity_name
+        description: Commodity description text
+      - name: flow_code
+        description: Trade flow direction — M (Import) or X (Export)
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["M", "X", "Re-Import", "Re-Export"]
+      - name: flow_name
+        description: Human-readable flow label
+      - name: period
+        description: Reporting period — YYYY (annual) or YYYYMM (monthly)
+        tests:
+          - not_null
+      - name: freq_code
+        description: Frequency code — A (annual) or M (monthly)
+        tests:
+          - accepted_values:
+              values: ["A", "M"]
+      - name: type_code
+        description: Trade type code — C (commodities) or S (services)
+      - name: trade_value_usd
+        description: Trade value in US dollars
+
+  - name: stg_mbs
+    description: >
+      Typed and renamed Monthly Bulletin of Statistics records.
+      Covers broad macroeconomic trade indicators per reporter and period.
+    columns:
+      - name: period
+        description: Reporting period
+        tests:
+          - not_null
+      - name: freq_code
+        description: Frequency code
+      - name: series_type
+        description: MBS series type identifier
+      - name: series_name
+        description: Human-readable series description
+      - name: reporter_code
+        description: UN numeric code for the reporting country
+      - name: reporter_iso
+        description: ISO 3-letter country code
+      - name: reporter_name
+        description: Full country name
+      - name: trade_value_usd
+        description: Trade indicator value in USD

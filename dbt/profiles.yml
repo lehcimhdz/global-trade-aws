@@ -1,0 +1,29 @@
+comtrade:
+  target: dev
+  outputs:
+    dev:
+      type: athena
+      region_name: "{{ env_var('AWS_DEFAULT_REGION', 'us-east-1') }}"
+      s3_staging_dir: "s3://{{ env_var('COMTRADE_S3_BUCKET') }}/dbt/athena-results/"
+      database: comtrade
+      schema: silver
+      aws_access_key_id: "{{ env_var('AWS_ACCESS_KEY_ID', '') }}"
+      aws_secret_access_key: "{{ env_var('AWS_SECRET_ACCESS_KEY', '') }}"
+      work_group: primary
+      threads: 4
+      lf_tags_database: null
+      lf_tags_table: null
+
+    prod:
+      type: athena
+      region_name: "{{ env_var('AWS_DEFAULT_REGION', 'us-east-1') }}"
+      s3_staging_dir: "s3://{{ env_var('COMTRADE_S3_BUCKET') }}/dbt/athena-results/"
+      database: comtrade
+      schema: silver
+      # In production the MWAA execution role is used; no explicit key needed.
+      aws_access_key_id: "{{ env_var('AWS_ACCESS_KEY_ID', '') }}"
+      aws_secret_access_key: "{{ env_var('AWS_SECRET_ACCESS_KEY', '') }}"
+      work_group: primary
+      threads: 8
+      lf_tags_database: null
+      lf_tags_table: null

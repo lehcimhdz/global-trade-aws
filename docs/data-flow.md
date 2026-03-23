@@ -2,6 +2,10 @@
 
 ## End-to-end pipeline
 
+The pipeline has two phases: **ingestion** (Airflow) and **transformation** (dbt).
+
+### Ingestion (Airflow)
+
 ```
 Airflow Scheduler
       │
@@ -71,6 +75,25 @@ Airflow Scheduler
                  ▼
            Iceberg: s3://<bucket>/iceberg/<endpoint>/  (Glue table: comtrade.<endpoint>)
 ```
+
+### Transformation (dbt)
+
+After the Airflow pipeline has populated the Iceberg tables, dbt transforms them into silver tables via Amazon Athena:
+
+```
+Iceberg bronze (Glue: comtrade.preview, comtrade.getmbs, …)
+        │
+        │  [dbt run]
+        ▼
+  staging views (stg_preview, stg_mbs)   — cast types, rename columns, filter nulls
+        │
+        ▼
+  silver Iceberg tables                   — queryable by Athena / BI tools
+    ├── trade_flows          — bilateral commodity-level aggregations
+    └── reporter_summary     — per-country export / import / balance totals
+```
+
+See [docs/dbt.md](dbt.md) for the full dbt project reference.
 
 ---
 

@@ -93,6 +93,8 @@ After each task, cross-cutting side effects fire automatically (never masking ta
 - **CloudWatch metrics** — emitted by `validate_bronze` (row count, check pass/fail, bytes written).
 - **OpenLineage events** — emitted by every task to Marquez when `OPENLINEAGE_URL` is configured.
 
+A separate **dbt** project (`dbt/`) transforms the Iceberg bronze tables into queryable silver tables via Amazon Athena.  It runs independently of the Airflow pipeline (scheduled separately or triggered manually).
+
 ---
 
 ## Infrastructure topology
@@ -133,6 +135,8 @@ After each task, cross-cutting side effects fire automatically (never masking ta
 | Columnar format | pandas + pyarrow | 2.2.2 / 16.1.0 |
 | Table format | Apache Iceberg (PyIceberg) | 0.7.1 |
 | Iceberg catalog | AWS Glue Data Catalog | — |
+| SQL transformations | dbt (dbt-athena-community) | 1.8.4 |
+| Query engine | Amazon Athena | — |
 | Base image | apache/airflow:2.9.3-python3.11 | — |
 | Observability — metrics | AWS CloudWatch | — |
 | Observability — lineage | Marquez (OpenLineage) | 0.50.0 |

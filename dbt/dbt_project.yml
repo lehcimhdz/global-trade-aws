@@ -1,0 +1,29 @@
+name: comtrade
+version: "1.0.0"
+config-version: 2
+
+profile: comtrade
+
+model-paths: ["models"]
+test-paths: ["tests"]
+seed-paths: ["seeds"]
+macro-paths: ["macros"]
+snapshot-paths: ["snapshots"]
+
+target-path: "target"
+clean-targets:
+  - "target"
+  - "dbt_packages"
+
+models:
+  comtrade:
+    staging:
+      +schema: staging
+      +materialized: view
+    silver:
+      +schema: silver
+      +materialized: table
+      +file_format: parquet
+      +table_type: iceberg
+      +s3_data_dir: "s3://{{ env_var('COMTRADE_S3_BUCKET') }}/dbt/silver/"
+      +partitioned_by: ["period"]

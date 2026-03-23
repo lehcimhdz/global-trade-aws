@@ -1,0 +1,92 @@
+version: 2
+
+models:
+  - name: trade_flows
+    description: >
+      Aggregated bilateral trade flows at commodity level.
+      One row per (period, reporter, partner, commodity, flow) combination.
+      Partitioned by period for efficient time-range scans.
+    columns:
+      - name: period
+        description: Reporting period — YYYY (annual) or YYYYMM (monthly)
+        tests:
+          - not_null
+      - name: freq_code
+        description: Frequency code — A (annual) or M (monthly)
+      - name: type_code
+        description: Trade type — C (commodities) or S (services)
+      - name: reporter_code
+        description: UN numeric code for the reporting country
+        tests:
+          - not_null
+      - name: reporter_iso
+        description: ISO 3-letter code for the reporter
+      - name: reporter_name
+        description: Full name of the reporting country
+      - name: partner_code
+        description: UN numeric code for the partner country
+        tests:
+          - not_null
+      - name: partner_iso
+        description: ISO 3-letter code for the partner
+      - name: partner_name
+        description: Full name of the partner country
+      - name: commodity_code
+        description: Commodity classification code
+      - name: commodity_name
+        description: Commodity description
+      - name: flow_code
+        description: Trade direction — M (Import) or X (Export)
+        tests:
+          - not_null
+          - accepted_values:
+              values: ["M", "X", "Re-Import", "Re-Export"]
+      - name: flow_name
+        description: Human-readable flow label
+      - name: trade_value_usd
+        description: Aggregated trade value in US dollars
+        tests:
+          - not_null
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: source_record_count
+        description: Number of raw records aggregated into this row
+
+  - name: reporter_summary
+    description: >
+      Country-level trade summary — exports, imports, balance, and diversity
+      metrics rolled up per reporter and period.
+      Useful for country comparison dashboards and high-level analytics.
+    columns:
+      - name: period
+        description: Reporting period
+        tests:
+          - not_null
+      - name: freq_code
+        description: Frequency code
+      - name: reporter_code
+        description: UN numeric code for the reporting country
+        tests:
+          - not_null
+      - name: reporter_iso
+        description: ISO 3-letter country code
+      - name: reporter_name
+        description: Full country name
+      - name: export_value_usd
+        description: Total export value in USD
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: import_value_usd
+        description: Total import value in USD
+        tests:
+          - dbt_utils.expression_is_true:
+              expression: ">= 0"
+      - name: total_trade_value_usd
+        description: Export + Import total in USD
+      - name: trade_balance_usd
+        description: Exports minus Imports (positive = trade surplus)
+      - name: commodity_count
+        description: Number of distinct commodities traded
+      - name: partner_count
+        description: Number of distinct trade partners
