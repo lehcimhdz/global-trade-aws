@@ -168,6 +168,44 @@ class TestSourcesYml:
         assert "reportercode" in columns_with_not_null
         assert "period" in columns_with_not_null
 
+    def test_loaded_at_field_defined_at_source_level(self):
+        bronze = next(s for s in self.doc["sources"] if s["name"] == "bronze")
+        assert bronze.get("loaded_at_field") == "_loaded_at"
+
+    def test_freshness_warn_after_defined(self):
+        bronze = next(s for s in self.doc["sources"] if s["name"] == "bronze")
+        freshness = bronze.get("freshness", {})
+        assert "warn_after" in freshness
+
+    def test_freshness_error_after_defined(self):
+        bronze = next(s for s in self.doc["sources"] if s["name"] == "bronze")
+        freshness = bronze.get("freshness", {})
+        assert "error_after" in freshness
+
+    def test_freshness_warn_period_is_day(self):
+        bronze = next(s for s in self.doc["sources"] if s["name"] == "bronze")
+        warn = bronze["freshness"]["warn_after"]
+        assert warn.get("period") == "day"
+
+    def test_freshness_error_period_is_day(self):
+        bronze = next(s for s in self.doc["sources"] if s["name"] == "bronze")
+        error = bronze["freshness"]["error_after"]
+        assert error.get("period") == "day"
+
+    def test_freshness_warn_count_less_than_error_count(self):
+        bronze = next(s for s in self.doc["sources"] if s["name"] == "bronze")
+        warn_count = bronze["freshness"]["warn_after"]["count"]
+        error_count = bronze["freshness"]["error_after"]["count"]
+        assert warn_count < error_count
+
+    def test_loaded_at_column_declared_on_all_tables(self):
+        bronze = next(s for s in self.doc["sources"] if s["name"] == "bronze")
+        for table in bronze["tables"]:
+            col_names = [c["name"] for c in table.get("columns", [])]
+            assert "_loaded_at" in col_names, (
+                f"Table {table['name']!r} is missing the _loaded_at column declaration"
+            )
+
 
 # ── Staging models ────────────────────────────────────────────────────────────
 

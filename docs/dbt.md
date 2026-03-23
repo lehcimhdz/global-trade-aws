@@ -53,6 +53,28 @@ Declared in `models/sources.yml`.  Each source maps a dbt name to an Iceberg tab
 | `bronze.previewtariffline` | `comtrade.previewtariffline` | Tariff-line granularity |
 | `bronze.getmbs` | `comtrade.getmbs` | Monthly Bulletin of Statistics |
 
+#### Source freshness
+
+The Iceberg writer stamps every record batch with a `_loaded_at` UTC timestamp.  dbt source freshness uses this column to verify that bronze tables are not stale before running expensive model materializations.
+
+```yaml
+loaded_at_field: _loaded_at
+freshness:
+  warn_after:  {count: 26, period: day}
+  error_after: {count: 35, period: day}
+```
+
+| Threshold | Value | Rationale |
+|-----------|-------|-----------|
+| `warn_after` | 26 days | Slightly past one monthly cycle — alerts without aborting |
+| `error_after` | 35 days | One month + 5-day grace — aborts the dbt run; stale data must not reach silver |
+
+Run manually:
+
+```bash
+cd dbt && dbt source freshness
+```
+
 ### Staging (`+materialized: view`)
 
 Light-weight views that sit directly on top of Iceberg sources.  No data is copied — queries are pushed down to Athena.
@@ -160,15 +182,18 @@ The `comtrade_dbt` DAG (`dags/comtrade_dbt.py`) orchestrates the full dbt run fr
 ### Task order
 
 ```
-dbt_deps → dbt_run_staging → dbt_run_silver → dbt_test
+dbt_deps → dbt_source_freshness → dbt_run_staging → dbt_run_silver → dbt_test
 ```
 
 | Task | Command | Purpose |
 |------|---------|---------|
 | `dbt_deps` | `dbt deps` | Install / refresh dbt packages (`dbt_utils`) |
+| `dbt_source_freshness` | `dbt source freshness` | Verify bronze tables were refreshed within 26/35-day thresholds |
 | `dbt_run_staging` | `dbt run --select staging` | Materialise staging views against bronze Iceberg tables |
 | `dbt_run_silver` | `dbt run --select silver` | Materialise silver Iceberg tables via Athena |
 | `dbt_test` | `dbt test` | Run all schema + custom singular tests |
+
+If `dbt_source_freshness` exits with an error (tables older than 35 days), the downstream tasks are marked skipped in Airflow and the Slack failure callback fires.
 
 ### Schedule
 

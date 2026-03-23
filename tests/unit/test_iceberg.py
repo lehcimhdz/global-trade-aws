@@ -91,6 +91,82 @@ class TestPureHelpers:
         assert _table_location("bucket", "preview") == "s3://bucket/iceberg/preview"
 
 
+# ── _add_loaded_at ────────────────────────────────────────────────────────────
+
+
+class TestAddLoadedAt:
+    def test_injects_loaded_at_key(self):
+        from comtrade.iceberg import _add_loaded_at
+
+        result = _add_loaded_at([{"a": 1}])
+        assert "_loaded_at" in result[0]
+
+    def test_preserves_original_fields(self):
+        from comtrade.iceberg import _add_loaded_at
+
+        result = _add_loaded_at([{"reportercode": "840", "primaryvalue": "100"}])
+        assert result[0]["reportercode"] == "840"
+        assert result[0]["primaryvalue"] == "100"
+
+    def test_loaded_at_is_iso8601_utc(self):
+        from datetime import datetime, timezone
+        from comtrade.iceberg import _add_loaded_at
+
+        result = _add_loaded_at([{"x": 1}])
+        ts = result[0]["_loaded_at"]
+        # Must parse as a valid datetime with UTC offset
+        parsed = datetime.fromisoformat(ts)
+        assert parsed.tzinfo is not None
+
+    def test_all_records_share_same_timestamp(self):
+        from comtrade.iceberg import _add_loaded_at
+
+        records = [{"a": 1}, {"b": 2}, {"c": 3}]
+        result = _add_loaded_at(records)
+        timestamps = {r["_loaded_at"] for r in result}
+        assert len(timestamps) == 1, "All records in a batch must share the same _loaded_at"
+
+    def test_empty_list_returns_empty(self):
+        from comtrade.iceberg import _add_loaded_at
+
+        assert _add_loaded_at([]) == []
+
+    def test_does_not_mutate_original_records(self):
+        from comtrade.iceberg import _add_loaded_at
+
+        original = [{"a": 1}]
+        _add_loaded_at(original)
+        assert "_loaded_at" not in original[0]
+
+    def test_loaded_at_injected_before_pa_table_creation(self):
+        """write_to_iceberg must call _records_to_pa_table with stamped records."""
+        import sys
+        from types import ModuleType
+        from unittest import mock
+
+        rows = [{"reportercode": "840"}]
+        pa_patch, pa_table = _fake_pyarrow_modules(rows)
+        ic_patch, catalog_mod, exceptions_mod = _fake_pyiceberg_modules()
+
+        captured: list = []
+
+        with pa_patch, ic_patch:
+            import pyarrow as pa
+            original_from_pylist = pa.Table.from_pylist
+
+            def _capturing_from_pylist(records):
+                captured.extend(records)
+                return pa_table
+
+            pa.Table.from_pylist = mock.Mock(side_effect=_capturing_from_pylist)
+
+            from comtrade.iceberg import write_to_iceberg
+            write_to_iceberg(rows, endpoint="preview", bucket="b", region="us-east-1")
+
+        assert len(captured) == 1
+        assert "_loaded_at" in captured[0]
+
+
 # ── _records_to_pa_table ──────────────────────────────────────────────────────
 
 

@@ -8,7 +8,12 @@ and materialises two silver Iceberg tables via Amazon Athena:
   - ``reporter_summary``  — per-country export / import / balance totals
 
 Task order:
-  dbt_deps → dbt_run_staging → dbt_run_silver → dbt_test
+  dbt_deps → dbt_source_freshness → dbt_run_staging → dbt_run_silver → dbt_test
+
+``dbt_source_freshness`` checks that each bronze Iceberg table was refreshed
+within its expected window (warn: 26 days, error: 35 days).  If the check
+errors the downstream model runs are skipped, preventing stale data from
+propagating to the silver layer.
 
 Airflow Variables used:
   COMTRADE_S3_BUCKET       — S3 bucket (forwarded to dbt as env var)
@@ -73,6 +78,12 @@ with DAG(
         env=_DBT_ENV,
     )
 
+    dbt_source_freshness = BashOperator(
+        task_id="dbt_source_freshness",
+        bash_command=_dbt("source freshness"),
+        env=_DBT_ENV,
+    )
+
     dbt_run_staging = BashOperator(
         task_id="dbt_run_staging",
         bash_command=_dbt("run --select staging"),
@@ -91,4 +102,4 @@ with DAG(
         env=_DBT_ENV,
     )
 
-    dbt_deps >> dbt_run_staging >> dbt_run_silver >> dbt_test
+    dbt_deps >> dbt_source_freshness >> dbt_run_staging >> dbt_run_silver >> dbt_test

@@ -24,6 +24,7 @@ Iceberg failures must never fail the pipeline.
 from __future__ import annotations
 
 import logging
+from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
 logger = logging.getLogger(__name__)
@@ -44,6 +45,18 @@ def _table_identifier(endpoint: str) -> str:
 
 def _table_location(bucket: str, endpoint: str) -> str:
     return f"{_warehouse_uri(bucket)}/{endpoint}"
+
+
+def _add_loaded_at(records: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+    """Inject a ``_loaded_at`` UTC ISO-8601 timestamp into every record.
+
+    dbt source freshness uses this column (``loaded_at_field: _loaded_at``) to
+    determine how stale the bronze tables are.  All records in a single batch
+    share the same timestamp so the column is monotonically non-decreasing across
+    pipeline runs.
+    """
+    now = datetime.now(timezone.utc).isoformat()
+    return [{**r, "_loaded_at": now} for r in records]
 
 
 def _records_to_pa_table(records: List[Dict[str, Any]]):
@@ -143,7 +156,7 @@ def write_to_iceberg(
             logger.warning("No records to write to Iceberg for endpoint=%s", endpoint)
             return None
 
-        pa_table = _records_to_pa_table(records)
+        pa_table = _records_to_pa_table(_add_loaded_at(records))
         warehouse = _warehouse_uri(bucket)
         catalog = _get_catalog(region=region, warehouse=warehouse)
 

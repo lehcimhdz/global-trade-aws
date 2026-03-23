@@ -9,6 +9,20 @@ sources:
       the AWS Glue Data Catalog under the "comtrade" database.
     database: comtrade
     schema: comtrade
+
+    # ── Source freshness ──────────────────────────────────────────────────────
+    # The Iceberg writer stamps every record with a UTC timestamp in _loaded_at.
+    # dbt source freshness uses this column to verify that each bronze table was
+    # refreshed within the expected window after its scheduled ingestion run.
+    #
+    # All ingestion DAGs run @monthly, so:
+    #   warn_after  = 26 days  — slightly past one full monthly cycle
+    #   error_after = 35 days  — one month + 5-day grace period
+    loaded_at_field: _loaded_at
+    freshness:
+      warn_after:  {count: 26, period: day}
+      error_after: {count: 35, period: day}
+
     tables:
       - name: preview
         description: >
@@ -37,6 +51,8 @@ sources:
             description: Reporting period — YYYY (annual) or YYYYMM (monthly)
             tests:
               - not_null
+          - name: _loaded_at
+            description: UTC timestamp injected by the Iceberg writer — used for dbt source freshness
 
       - name: previewtariffline
         description: >
@@ -49,6 +65,8 @@ sources:
           - name: period
             tests:
               - not_null
+          - name: _loaded_at
+            description: UTC timestamp injected by the Iceberg writer — used for dbt source freshness
 
       - name: getmbs
         description: >
@@ -58,3 +76,5 @@ sources:
           - name: period
             tests:
               - not_null
+          - name: _loaded_at
+            description: UTC timestamp injected by the Iceberg writer — used for dbt source freshness

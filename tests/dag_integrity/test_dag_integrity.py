@@ -88,7 +88,13 @@ EXPECTED_DAGS: dict[str, dict] = {
     "comtrade_dbt": {
         "schedule": "@monthly",
         "tags": {"comtrade", "dbt", "silver"},
-        "task_ids": {"dbt_deps", "dbt_run_staging", "dbt_run_silver", "dbt_test"},
+        "task_ids": {
+            "dbt_deps",
+            "dbt_source_freshness",
+            "dbt_run_staging",
+            "dbt_run_silver",
+            "dbt_test",
+        },
         "catchup": False,
     },
 }
@@ -275,15 +281,19 @@ class TestDbtDag:
     def test_dbt_dag_is_present(self, dagbag):
         assert "comtrade_dbt" in dagbag.dags, "comtrade_dbt DAG is missing"
 
-    def test_has_four_tasks(self, dagbag):
+    def test_has_five_tasks(self, dagbag):
         dag = dagbag.get_dag("comtrade_dbt")
-        assert len(dag.tasks) == 4, (
-            f"Expected 4 dbt tasks, got {len(dag.tasks)}: {[t.task_id for t in dag.tasks]}"
+        assert len(dag.tasks) == 5, (
+            f"Expected 5 dbt tasks, got {len(dag.tasks)}: {[t.task_id for t in dag.tasks]}"
         )
 
     def test_dbt_deps_task_exists(self, dagbag):
         dag = dagbag.get_dag("comtrade_dbt")
         assert dag.has_task("dbt_deps")
+
+    def test_dbt_source_freshness_task_exists(self, dagbag):
+        dag = dagbag.get_dag("comtrade_dbt")
+        assert dag.has_task("dbt_source_freshness")
 
     def test_dbt_run_staging_task_exists(self, dagbag):
         dag = dagbag.get_dag("comtrade_dbt")
@@ -297,10 +307,15 @@ class TestDbtDag:
         dag = dagbag.get_dag("comtrade_dbt")
         assert dag.has_task("dbt_test")
 
-    def test_run_staging_depends_on_deps(self, dagbag):
+    def test_source_freshness_depends_on_deps(self, dagbag):
+        dag = dagbag.get_dag("comtrade_dbt")
+        upstream_ids = {t.task_id for t in dag.get_task("dbt_source_freshness").upstream_list}
+        assert "dbt_deps" in upstream_ids
+
+    def test_run_staging_depends_on_source_freshness(self, dagbag):
         dag = dagbag.get_dag("comtrade_dbt")
         upstream_ids = {t.task_id for t in dag.get_task("dbt_run_staging").upstream_list}
-        assert "dbt_deps" in upstream_ids
+        assert "dbt_source_freshness" in upstream_ids
 
     def test_run_silver_depends_on_staging(self, dagbag):
         dag = dagbag.get_dag("comtrade_dbt")
