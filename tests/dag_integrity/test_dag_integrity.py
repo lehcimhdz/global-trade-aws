@@ -1,7 +1,7 @@
 """
 DAG integrity tests
 
-Verifies that all 9 Comtrade DAGs (8 ingestion + 1 dbt):
+Verifies that all 10 Comtrade DAGs (8 ingestion + 1 dbt + 1 backfill):
   1. Parse and import without errors
   2. Have the expected dag_id, schedule, tags, and catchup setting
   3. Contain exactly the expected tasks with correct task IDs
@@ -82,7 +82,7 @@ INGESTION_DAGS: dict[str, dict] = {
     },
 }
 
-# All DAGs — ingestion + dbt transformation.
+# All DAGs — ingestion + dbt transformation + backfill.
 EXPECTED_DAGS: dict[str, dict] = {
     **INGESTION_DAGS,
     "comtrade_dbt": {
@@ -95,6 +95,12 @@ EXPECTED_DAGS: dict[str, dict] = {
             "dbt_run_silver",
             "dbt_test",
         },
+        "catchup": False,
+    },
+    "comtrade_backfill": {
+        "schedule": None,   # manually triggered only
+        "tags": {"comtrade", "backfill"},
+        "task_ids": {"validate_conf", "run_backfill"},
         "catchup": False,
     },
 }
@@ -144,11 +150,18 @@ class TestDagSchedule:
     @pytest.mark.parametrize("dag_id,meta", EXPECTED_DAGS.items())
     def test_schedule_interval(self, dagbag, dag_id, meta):
         dag = dagbag.get_dag(dag_id)
-        # Airflow 2.4+ stores timetable; schedule_interval is kept for compatibility
-        actual = dag.schedule_interval or str(dag.timetable)
-        assert actual == meta["schedule"], (
-            f"{dag_id}: expected schedule '{meta['schedule']}', got '{actual}'"
-        )
+        if meta["schedule"] is None:
+            # Manually-triggered DAGs (schedule=None) have no timetable.
+            assert dag.schedule_interval is None, (
+                f"{dag_id}: expected schedule=None (manually triggered), "
+                f"got '{dag.schedule_interval}'"
+            )
+        else:
+            # Airflow 2.4+ stores timetable; schedule_interval is kept for compatibility.
+            actual = dag.schedule_interval or str(dag.timetable)
+            assert actual == meta["schedule"], (
+                f"{dag_id}: expected schedule '{meta['schedule']}', got '{actual}'"
+            )
 
 
 class TestDagConfig:
@@ -265,6 +278,7 @@ class TestDagFiles:
             "comtrade_da": "comtrade_da.py",
             "comtrade_releases": "comtrade_releases.py",
             "comtrade_dbt": "comtrade_dbt.py",
+            "comtrade_backfill": "comtrade_backfill.py",
         }
         for dag_id, filename in dag_id_to_file.items():
             path = DAGS_DIR / filename
@@ -333,3 +347,54 @@ class TestDbtDag:
             dag.topological_sort()
         except Exception as exc:
             pytest.fail(f"comtrade_dbt: topological sort failed (cycle?): {exc}")
+
+
+class TestBackfillDag:
+    """Structural tests for the comtrade_backfill manually-triggered DAG."""
+
+    def test_backfill_dag_is_present(self, dagbag):
+        assert "comtrade_backfill" in dagbag.dags, "comtrade_backfill DAG is missing"
+
+    def test_schedule_is_none(self, dagbag):
+        dag = dagbag.get_dag("comtrade_backfill")
+        assert dag.schedule_interval is None, (
+            "comtrade_backfill must have schedule=None (manually triggered)"
+        )
+
+    def test_catchup_is_false(self, dagbag):
+        dag = dagbag.get_dag("comtrade_backfill")
+        assert dag.catchup is False
+
+    def test_has_two_tasks(self, dagbag):
+        dag = dagbag.get_dag("comtrade_backfill")
+        assert len(dag.tasks) == 2, (
+            f"Expected 2 tasks, got {len(dag.tasks)}: {[t.task_id for t in dag.tasks]}"
+        )
+
+    def test_validate_conf_task_exists(self, dagbag):
+        dag = dagbag.get_dag("comtrade_backfill")
+        assert dag.has_task("validate_conf")
+
+    def test_run_backfill_task_exists(self, dagbag):
+        dag = dagbag.get_dag("comtrade_backfill")
+        assert dag.has_task("run_backfill")
+
+    def test_run_backfill_depends_on_validate_conf(self, dagbag):
+        dag = dagbag.get_dag("comtrade_backfill")
+        upstream_ids = {t.task_id for t in dag.get_task("run_backfill").upstream_list}
+        assert "validate_conf" in upstream_ids
+
+    def test_has_description(self, dagbag):
+        dag = dagbag.get_dag("comtrade_backfill")
+        assert dag.description
+
+    def test_tags_include_backfill(self, dagbag):
+        dag = dagbag.get_dag("comtrade_backfill")
+        assert "backfill" in dag.tags
+
+    def test_no_cycles(self, dagbag):
+        dag = dagbag.get_dag("comtrade_backfill")
+        try:
+            dag.topological_sort()
+        except Exception as exc:
+            pytest.fail(f"comtrade_backfill: topological sort failed (cycle?): {exc}")

@@ -195,6 +195,18 @@ dbt-clean: ## Remove dbt compiled artefacts
 # Trade API
 # ─────────────────────────────────────────────────────────────────────────────
 
+# ─────────────────────────────────────────────────────────────────────────────
+# Backfill
+# ─────────────────────────────────────────────────────────────────────────────
+
+.PHONY: backfill
+backfill: ## Trigger a historical backfill — usage: make backfill ENDPOINT=preview PERIODS=2020,2021,2022
+	./scripts/trigger_backfill.sh --endpoint $(ENDPOINT) --periods $(PERIODS)
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trade API
+# ─────────────────────────────────────────────────────────────────────────────
+
 .PHONY: api-build
 api-build: ## Bundle api/ + dependencies into build/api.zip (required before terraform apply)
 	@echo "$(CYAN)Building Lambda deployment package…$(RESET)"

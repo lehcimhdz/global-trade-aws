@@ -464,6 +464,94 @@ terraform output athena_named_queries
 
 ---
 
+## Backfill
+
+All ingestion DAGs have `catchup=False` — historical periods are not automatically loaded.  Use the `comtrade_backfill` DAG to fill gaps or reload specific years.
+
+### How it works
+
+`comtrade_backfill` is a manually-triggered DAG (`schedule=None`).  It accepts parameters via `dag_run.conf`, then runs two tasks:
+
+```
+validate_conf → run_backfill
+```
+
+- **`validate_conf`** — checks required keys and endpoint name; fails fast before any API call.
+- **`run_backfill`** — iterates over every period, calls the Comtrade API, writes raw JSON to S3, and returns a summary `{period: {status, key}}`.  If any period fails, the task fails and the Slack callback fires.
+
+### Supported endpoints
+
+| `endpoint` conf value | Comtrade API | Notes |
+|-----------------------|-------------|-------|
+| `preview` | `/public/v1/preview/{type}/{freq}/{cl}` | Main bilateral trade flows |
+| `previewTariffline` | `/public/v1/previewTariffline/…` | Tariff-line level flows |
+| `getMBS` | `/public/v1/getMBS` | Monthly Bulletin of Statistics |
+
+### Triggering a backfill
+
+**Option A — convenience script:**
+
+```bash
+# Backfill US annual data for 2019–2022
+./scripts/trigger_backfill.sh \
+    --endpoint preview \
+    --periods  2019,2020,2021,2022 \
+    --reporter 842
+
+# Monthly data for 2023
+./scripts/trigger_backfill.sh \
+    --endpoint getMBS \
+    --periods  202301,202302,202303,202304 \
+    --freq-code M
+```
+
+Set `AIRFLOW_CMD` to override the default (`docker compose exec airflow-webserver airflow`):
+
+```bash
+AIRFLOW_CMD="airflow" ./scripts/trigger_backfill.sh --endpoint preview --periods 2020,2021
+```
+
+**Option B — Airflow CLI directly:**
+
+```bash
+docker compose exec airflow-webserver \
+  airflow dags trigger comtrade_backfill \
+  --conf '{
+    "endpoint":      "preview",
+    "periods":       ["2020", "2021", "2022"],
+    "type_code":     "C",
+    "freq_code":     "A",
+    "cl_code":       "HS",
+    "reporter_code": "842"
+  }'
+```
+
+**Option C — Airflow UI:**
+
+1. Open `http://localhost:8080` → `comtrade_backfill`
+2. Click **Trigger DAG w/ config**
+3. Paste the conf JSON and submit
+
+### dag_run.conf reference
+
+| Key | Required | Default | Description |
+|-----|----------|---------|-------------|
+| `endpoint` | ✅ | — | API endpoint to backfill |
+| `periods` | ✅ | — | List of period strings (e.g. `["2020", "2021"]`) |
+| `type_code` | — | `"C"` | Commodity type code |
+| `freq_code` | — | `"A"` | Frequency: `A` (annual) or `M` (monthly) |
+| `cl_code` | — | `"HS"` | Classification code |
+| `reporter_code` | — | `null` | Reporter country code(s) |
+| `partner_code` | — | `null` | Partner country code(s) |
+| `cmd_code` | — | `null` | Commodity code(s) |
+| `flow_code` | — | `null` | `X` (exports) or `M` (imports) |
+
+### Monitoring
+
+The backfill DAG appears in the standard DAG list at `http://localhost:8080`.  The `run_backfill` task XCom contains the per-period summary dict — inspect it in the UI under **Grid view → run_backfill → XCom**.
+
+---
+
 ## Trade API
 
 The trade API is a FastAPI application deployed as an AWS Lambda function and exposed via a Lambda Function URL.  It queries the `comtrade_silver` Athena tables and returns JSON responses.
