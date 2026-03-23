@@ -75,6 +75,14 @@ Shared Python library mounted into every Airflow container via the `plugins/` vo
 ### DAG files (`dags/`)
 Thin orchestration files — one per API endpoint. They declare schedules, read Airflow Variables, and wire tasks produced by the factory.
 
+### `api/` package
+FastAPI application deployed as AWS Lambda. Serves the silver Iceberg tables to external consumers via HTTP.
+
+| Module | Responsibility |
+|--------|----------------|
+| `main.py` | FastAPI routes — `/health`, `/v1/reporters`, `/v1/reporters/{iso}/summary`, `/v1/trade-flows` |
+| `athena.py` | Synchronous Athena query runner — start, poll, paginate results into list of dicts |
+
 ---
 
 ## Execution model
@@ -140,3 +148,5 @@ The **`comtrade_dbt`** DAG orchestrates a four-task dbt run (`dbt_deps → dbt_r
 | Base image | apache/airflow:2.9.3-python3.11 | — |
 | Observability — metrics | AWS CloudWatch | — |
 | Observability — lineage | Marquez (OpenLineage) | 0.50.0 |
+| Data serving — API | FastAPI + Mangum (Lambda) | 0.111.1 / 0.17.0 |
+| Data serving — BI | Amazon QuickSight (SPICE) | — |

@@ -80,3 +80,17 @@ variable "quicksight_username" {
   description = "QuickSight username (format: <username>) that will receive dataset permissions. Required when enable_quicksight = true."
   default     = ""
 }
+
+# ── Trade API ──────────────────────────────────────────────────────────────────
+
+variable "enable_api" {
+  type        = bool
+  description = "Deploy the FastAPI trade API as an AWS Lambda function with a Function URL."
+  default     = false
+}
+
+variable "api_lambda_layer_arn" {
+  type        = string
+  description = "ARN of a Lambda layer containing FastAPI and Mangum dependencies. Leave empty to bundle dependencies in the deployment package."
+  default     = ""
+}

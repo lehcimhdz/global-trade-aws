@@ -190,3 +190,26 @@ dbt-full: dbt-deps dbt-run dbt-test ## Full dbt pipeline: deps → run → test
 .PHONY: dbt-clean
 dbt-clean: ## Remove dbt compiled artefacts
 	cd $(DBT_DIR) && dbt clean
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Trade API
+# ─────────────────────────────────────────────────────────────────────────────
+
+.PHONY: api-build
+api-build: ## Bundle api/ + dependencies into build/api.zip (required before terraform apply)
+	@echo "$(CYAN)Building Lambda deployment package…$(RESET)"
+	rm -rf build/lambda_pkg build/api.zip
+	mkdir -p build/lambda_pkg
+	pip install --quiet -r api/requirements.txt --target build/lambda_pkg
+	cp api/*.py build/lambda_pkg/
+	cd build/lambda_pkg && zip -rq ../api.zip . && echo "$(GREEN)build/api.zip ready.$(RESET)"
+	rm -rf build/lambda_pkg
+
+.PHONY: api-local
+api-local: ## Run the trade API locally (requires fastapi + uvicorn installed)
+	ATHENA_WORKGROUP=local ATHENA_OUTPUT_LOCATION=local AWS_DEFAULT_REGION=us-east-1 \
+	  uvicorn api.main:app --reload --port 8000
+
+.PHONY: test-api
+test-api: ## Run trade API unit tests only
+	pytest tests/unit/test_api.py tests/unit/test_api_terraform.py -v

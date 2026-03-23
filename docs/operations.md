@@ -464,6 +464,89 @@ terraform output athena_named_queries
 
 ---
 
+## Trade API
+
+The trade API is a FastAPI application deployed as an AWS Lambda function and exposed via a Lambda Function URL.  It queries the `comtrade_silver` Athena tables and returns JSON responses.
+
+### Endpoints
+
+| Method | Path | Description |
+|--------|------|-------------|
+| `GET` | `/health` | Liveness probe |
+| `GET` | `/v1/reporters` | Top reporters ranked by total trade value |
+| `GET` | `/v1/reporters/{reporter_iso}/summary` | Annual time-series for one country |
+| `GET` | `/v1/trade-flows` | Commodity-level bilateral flows |
+
+All data endpoints filter to annual data (`freq_code = 'A'`).
+
+**Query parameters:**
+
+| Endpoint | Parameter | Type | Default | Notes |
+|----------|-----------|------|---------|-------|
+| `/v1/reporters` | `period` | `YYYY` | — | Filter to single year |
+| `/v1/reporters` | `limit` | 1–200 | 20 | |
+| `/v1/reporters/{iso}/summary` | `limit` | 1–50 | 10 | |
+| `/v1/trade-flows` | `reporter_iso` | ISO-2/3 | — | |
+| `/v1/trade-flows` | `partner_iso` | ISO-2/3 | — | |
+| `/v1/trade-flows` | `period` | `YYYY` | — | |
+| `/v1/trade-flows` | `flow_code` | X \| M | — | X = exports, M = imports |
+| `/v1/trade-flows` | `limit` | 1–1000 | 100 | |
+
+### Enabling the API
+
+**Step 1 — build the deployment package:**
+
+```bash
+make api-build          # creates build/api.zip with fastapi + mangum bundled
+```
+
+**Step 2 — apply Terraform:**
+
+```bash
+terraform apply -var="enable_api=true"
+```
+
+**Step 3 — get the endpoint URL:**
+
+```bash
+terraform output api_endpoint_url
+```
+
+### Example calls
+
+```bash
+BASE=$(terraform output -raw api_endpoint_url)
+
+# Top 10 reporters in 2022
+curl "${BASE}/v1/reporters?period=2022&limit=10"
+
+# US annual trade summary
+curl "${BASE}/v1/reporters/USA/summary"
+
+# Top US–China imports in 2022
+curl "${BASE}/v1/trade-flows?reporter_iso=USA&partner_iso=CHN&period=2022&flow_code=M&limit=20"
+```
+
+### Running locally
+
+```bash
+pip install fastapi uvicorn
+make api-local          # serves on http://localhost:8000
+# Interactive docs: http://localhost:8000/docs
+```
+
+### Lambda layer (optional)
+
+To keep the deployment package small, provide a Lambda layer with the Python dependencies (fastapi, mangum) and set `api_lambda_layer_arn` in your `.tfvars`:
+
+```hcl
+api_lambda_layer_arn = "arn:aws:lambda:us-east-1:123456789012:layer:trade-api-deps:1"
+```
+
+When the layer ARN is set, `make api-build` only needs to zip the source code (not the dependencies).
+
+---
+
 ## QuickSight dashboards
 
 QuickSight provides a managed BI layer on top of the silver Iceberg tables (queried via Athena).  All resources are Terraform-provisioned and gated on a feature flag so they are not deployed by default.

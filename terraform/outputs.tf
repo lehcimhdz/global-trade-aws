@@ -66,6 +66,11 @@ output "athena_named_queries" {
   description = "Map of named query identifiers — run via the Athena console or API"
 }
 
+output "api_endpoint_url" {
+  value       = var.enable_api ? aws_lambda_function_url.api[0].function_url : null
+  description = "Trade API base URL (null when enable_api = false). Example: GET <url>/v1/reporters?period=2022"
+}
+
 output "quicksight_data_source_arn" {
   value       = var.enable_quicksight ? aws_quicksight_data_source.athena[0].arn : null
   description = "QuickSight Athena data source ARN (null when enable_quicksight = false)"
