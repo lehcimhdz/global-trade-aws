@@ -1,16 +1,24 @@
 # ── CloudWatch dashboard — Comtrade Pipeline ──────────────────────────────────
 #
-# Ops-facing view of the four custom metrics emitted by validate_bronze:
+# Ops-facing view of pipeline metrics across ingestion and transformation:
 #
+# Ingestion metrics (emitted by validate_bronze, dim: DagId + Endpoint):
 #   RowCount         — data volume per DAG run
 #   ChecksPassed     — quality gate pass count
 #   ChecksFailed     — quality gate fail count  (also drives failure-rate widget)
 #   JsonBytesWritten — raw S3 data volume
 #
-# All metrics live under the Comtrade/Pipeline namespace with dimensions
-# DagId and Endpoint.  SEARCH expressions aggregate across all dimension
-# values automatically, so new DAGs / endpoints appear without any
-# dashboard change.
+# dbt transformation metrics (emitted by comtrade_dbt, dim: DagId + Phase):
+#   DbtRunDuration   — wall-clock seconds per dbt phase
+#   DbtModelsErrored — count of dbt models that errored
+#   DbtTestsFailed   — count of dbt tests that failed
+#
+# All custom metrics live under the Comtrade/Pipeline namespace.  SEARCH
+# expressions aggregate across all dimension values automatically.
+#
+# Athena cost alarm:
+#   ProcessedBytes in AWS/Athena namespace — alert when bytes scanned per
+#   5-minute window exceeds var.athena_bytes_scanned_alarm_gb.
 # ─────────────────────────────────────────────────────────────────────────────
 
 locals {
@@ -138,8 +146,90 @@ resource "aws_cloudwatch_dashboard" "comtrade_pipeline" {
             }]
           ]
         }
+      },
+
+      # ── Row 3, left: dbt run duration per phase ────────────────────────────
+      {
+        type   = "metric"
+        x      = 0
+        y      = 12
+        width  = 12
+        height = 6
+        properties = {
+          title   = "dbt Run Duration (seconds)"
+          view    = "timeSeries"
+          stacked = false
+          region  = var.aws_region
+          period  = local.cw_period_1d
+          yAxis   = { left = { min = 0 } }
+          metrics = [
+            [{
+              expression = "SEARCH('{${local.cw_namespace},DagId,Phase} MetricName=\"DbtRunDuration\"', 'Average', ${local.cw_period_1d})"
+              id         = "dur"
+              label      = "$${PROP('Dim.Phase')}"
+            }]
+          ]
+        }
+      },
+
+      # ── Row 3, right: dbt model errors and test failures ──────────────────
+      {
+        type   = "metric"
+        x      = 12
+        y      = 12
+        width  = 12
+        height = 6
+        properties = {
+          title   = "dbt Errors and Test Failures"
+          view    = "timeSeries"
+          stacked = true
+          region  = var.aws_region
+          period  = local.cw_period_1d
+          yAxis   = { left = { min = 0 } }
+          metrics = [
+            [{
+              expression = "SEARCH('{${local.cw_namespace},DagId,Phase} MetricName=\"DbtModelsErrored\"', 'Sum', ${local.cw_period_1d})"
+              id         = "me"
+              label      = "Models Errored [$${PROP('Dim.Phase')}]"
+              color      = "#d62728"
+            }],
+            [{
+              expression = "SEARCH('{${local.cw_namespace},DagId,Phase} MetricName=\"DbtTestsFailed\"', 'Sum', ${local.cw_period_1d})"
+              id         = "tf"
+              label      = "Tests Failed [$${PROP('Dim.Phase')}]"
+              color      = "#ff7f0e"
+            }]
+          ]
+        }
       }
 
     ]
   })
+}
+
+# ── Athena query cost alarm ────────────────────────────────────────────────────
+#
+# Athena auto-publishes ProcessedBytes to AWS/Athena when the workgroup has
+# publish_cloudwatch_metrics_enabled = true.  This alarm fires when the total
+# bytes scanned in a 5-minute window exceeds the configured threshold, giving
+# ops a heads-up before the per-query 10 GB hard limit is hit.
+
+resource "aws_cloudwatch_metric_alarm" "athena_bytes_scanned" {
+  alarm_name          = "${local.name_prefix}-athena-high-bytes-scanned"
+  alarm_description   = "Athena scanned more than ${var.athena_bytes_scanned_alarm_gb} GB in a 5-minute window on the comtrade workgroup — investigate runaway queries."
+  comparison_operator = "GreaterThanThreshold"
+  evaluation_periods  = 1
+  metric_name         = "ProcessedBytes"
+  namespace           = "AWS/Athena"
+  period              = 300
+  statistic           = "Sum"
+  # Convert GB to bytes: 1 GB = 1 073 741 824 bytes
+  threshold          = var.athena_bytes_scanned_alarm_gb * 1073741824
+  treat_missing_data = "notBreaching"
+
+  dimensions = {
+    WorkGroup = aws_athena_workgroup.comtrade.id
+  }
+
+  tags = local.tags
 }

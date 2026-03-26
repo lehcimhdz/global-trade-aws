@@ -15,7 +15,9 @@ import pytest
 
 from comtrade.metrics import (
     NAMESPACE,
+    _build_dbt_metric_data,
     _build_metric_data,
+    emit_dbt_metrics,
     emit_validation_metrics,
 )
 
@@ -208,3 +210,108 @@ class TestEmitValidationMetrics:
         kwargs = cw_client.put_metric_data.call_args.kwargs
         names = {m["MetricName"] for m in kwargs["MetricData"]}
         assert "JsonBytesWritten" not in names
+
+
+# ── _build_dbt_metric_data ────────────────────────────────────────────────────
+
+
+class TestBuildDbtMetricData:
+    def test_returns_three_metrics(self):
+        data = _build_dbt_metric_data("comtrade_dbt", "dbt_run_silver", 42.5, 0, 0)
+        names = {m["MetricName"] for m in data}
+        assert names == {"DbtRunDuration", "DbtModelsErrored", "DbtTestsFailed"}
+
+    def test_duration_value(self):
+        data = _build_dbt_metric_data("d", "p", 123.7, 0, 0)
+        dur = next(m for m in data if m["MetricName"] == "DbtRunDuration")
+        assert dur["Value"] == 123.7
+        assert dur["Unit"] == "Seconds"
+
+    def test_models_errored_value(self):
+        data = _build_dbt_metric_data("d", "p", 1.0, 3, 0)
+        me = next(m for m in data if m["MetricName"] == "DbtModelsErrored")
+        assert me["Value"] == 3.0
+        assert me["Unit"] == "Count"
+
+    def test_tests_failed_value(self):
+        data = _build_dbt_metric_data("d", "p", 1.0, 0, 7)
+        tf = next(m for m in data if m["MetricName"] == "DbtTestsFailed")
+        assert tf["Value"] == 7.0
+        assert tf["Unit"] == "Count"
+
+    def test_dimensions_contain_dag_id_and_phase(self):
+        data = _build_dbt_metric_data("comtrade_dbt", "dbt_test", 5.0, 0, 2)
+        for metric in data:
+            dim_map = {d["Name"]: d["Value"] for d in metric["Dimensions"]}
+            assert dim_map["DagId"] == "comtrade_dbt"
+            assert dim_map["Phase"] == "dbt_test"
+
+    def test_zero_errors_zero_failures(self):
+        data = _build_dbt_metric_data("d", "p", 10.0, 0, 0)
+        me = next(m for m in data if m["MetricName"] == "DbtModelsErrored")
+        tf = next(m for m in data if m["MetricName"] == "DbtTestsFailed")
+        assert me["Value"] == 0.0
+        assert tf["Value"] == 0.0
+
+
+# ── emit_dbt_metrics ──────────────────────────────────────────────────────────
+
+
+class TestEmitDbtMetrics:
+    def _mock_cw(self):
+        cw = mock.MagicMock()
+        client = mock.MagicMock()
+        cw.return_value = client
+        return cw, client
+
+    def test_calls_put_metric_data(self):
+        cw_mock, cw_client = self._mock_cw()
+        with mock.patch("boto3.client", cw_mock):
+            emit_dbt_metrics("comtrade_dbt", "dbt_run_silver", 30.0, 0, 0)
+        cw_client.put_metric_data.assert_called_once()
+
+    def test_namespace_is_correct(self):
+        cw_mock, cw_client = self._mock_cw()
+        with mock.patch("boto3.client", cw_mock):
+            emit_dbt_metrics("comtrade_dbt", "dbt_run_silver", 30.0)
+        kwargs = cw_client.put_metric_data.call_args.kwargs
+        assert kwargs["Namespace"] == NAMESPACE
+
+    def test_all_three_metrics_present(self):
+        cw_mock, cw_client = self._mock_cw()
+        with mock.patch("boto3.client", cw_mock):
+            emit_dbt_metrics("comtrade_dbt", "dbt_test", 15.0, 1, 2)
+        kwargs = cw_client.put_metric_data.call_args.kwargs
+        names = {m["MetricName"] for m in kwargs["MetricData"]}
+        assert {"DbtRunDuration", "DbtModelsErrored", "DbtTestsFailed"} == names
+
+    def test_cloudwatch_error_does_not_propagate(self):
+        with mock.patch("boto3.client", side_effect=RuntimeError("no credentials")):
+            emit_dbt_metrics("d", "p", 1.0)  # must not raise
+
+    def test_logs_success(self, caplog):
+        import logging
+
+        cw_mock, _ = self._mock_cw()
+        with mock.patch("boto3.client", cw_mock):
+            with caplog.at_level(logging.INFO, logger="comtrade.metrics"):
+                emit_dbt_metrics("comtrade_dbt", "dbt_run_silver", 45.0, 0, 0)
+        assert any("dbt metrics emitted" in r.message for r in caplog.records)
+
+    def test_logs_error_on_failure(self, caplog):
+        import logging
+
+        with mock.patch("boto3.client", side_effect=Exception("oops")):
+            with caplog.at_level(logging.ERROR, logger="comtrade.metrics"):
+                emit_dbt_metrics("d", "p", 1.0)
+        assert any("Failed to emit dbt" in r.message for r in caplog.records)
+
+    def test_default_errors_and_failures_are_zero(self):
+        cw_mock, cw_client = self._mock_cw()
+        with mock.patch("boto3.client", cw_mock):
+            emit_dbt_metrics("d", "p", 10.0)  # no models_errored / tests_failed
+        kwargs = cw_client.put_metric_data.call_args.kwargs
+        me = next(m for m in kwargs["MetricData"] if m["MetricName"] == "DbtModelsErrored")
+        tf = next(m for m in kwargs["MetricData"] if m["MetricName"] == "DbtTestsFailed")
+        assert me["Value"] == 0.0
+        assert tf["Value"] == 0.0

@@ -37,6 +37,20 @@ variable "secrets_recovery_window_days" {
   default     = 0
 }
 
+# ── Data retention ────────────────────────────────────────────────────────────
+
+variable "iceberg_snapshot_retention_days" {
+  type        = number
+  description = "Days to retain Iceberg snapshot metadata files in S3 before expiry. Set to 0 to disable automatic cleanup."
+  default     = 90
+}
+
+variable "athena_bytes_scanned_alarm_gb" {
+  type        = number
+  description = "Alert threshold for total Athena bytes scanned per 5-minute window (GB). Default is 50% of the per-query hard limit."
+  default     = 5
+}
+
 # ── MWAA ──────────────────────────────────────────────────────────────────────
 
 variable "enable_mwaa" {

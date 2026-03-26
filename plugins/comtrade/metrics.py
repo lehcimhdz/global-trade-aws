@@ -98,6 +98,49 @@ def _build_metric_data(
     return data
 
 
+# ── Internal helpers — dbt ────────────────────────────────────────────────────
+
+
+def _build_dbt_metric_data(
+    dag_id: str,
+    phase: str,
+    duration_seconds: float,
+    models_errored: int,
+    tests_failed: int,
+) -> List[Dict[str, Any]]:
+    """
+    Build the MetricData list for a dbt run phase.
+
+    Pure function — exposed for unit testing.
+
+    Dimensions: DagId, Phase.
+    """
+    dimensions = [
+        {"Name": "DagId", "Value": dag_id},
+        {"Name": "Phase", "Value": phase},
+    ]
+    return [
+        {
+            "MetricName": "DbtRunDuration",
+            "Value": float(duration_seconds),
+            "Unit": "Seconds",
+            "Dimensions": dimensions,
+        },
+        {
+            "MetricName": "DbtModelsErrored",
+            "Value": float(models_errored),
+            "Unit": "Count",
+            "Dimensions": dimensions,
+        },
+        {
+            "MetricName": "DbtTestsFailed",
+            "Value": float(tests_failed),
+            "Unit": "Count",
+            "Dimensions": dimensions,
+        },
+    ]
+
+
 # ── Public API ─────────────────────────────────────────────────────────────────
 
 
@@ -152,3 +195,51 @@ def emit_validation_metrics(
         )
     except Exception as exc:
         logger.error("Failed to emit CloudWatch metrics: %s", exc)
+
+
+def emit_dbt_metrics(
+    dag_id: str,
+    phase: str,
+    duration_seconds: float,
+    models_errored: int = 0,
+    tests_failed: int = 0,
+) -> None:
+    """
+    Emit dbt run metrics to CloudWatch after a dbt task completes.
+
+    Parameters
+    ----------
+    dag_id:
+        Airflow DAG id — used as the ``DagId`` CloudWatch dimension.
+    phase:
+        dbt task id (e.g. ``dbt_run_silver``) — used as the ``Phase`` dimension.
+    duration_seconds:
+        Wall-clock seconds the dbt command took to complete.
+    models_errored:
+        Number of dbt models that finished with status ``error``.
+    tests_failed:
+        Number of dbt tests that finished with status ``fail``.
+    """
+    try:
+        import boto3
+
+        metric_data = _build_dbt_metric_data(
+            dag_id, phase, duration_seconds, models_errored, tests_failed
+        )
+        region = _get_region()
+
+        boto3.client("cloudwatch", region_name=region).put_metric_data(
+            Namespace=NAMESPACE,
+            MetricData=metric_data,
+        )
+
+        logger.info(
+            "dbt metrics emitted — dag=%s phase=%s duration=%.1fs errored=%d failed=%d",
+            dag_id,
+            phase,
+            duration_seconds,
+            models_errored,
+            tests_failed,
+        )
+    except Exception as exc:
+        logger.error("Failed to emit dbt CloudWatch metrics: %s", exc)

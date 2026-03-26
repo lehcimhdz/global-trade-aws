@@ -98,6 +98,64 @@ resource "aws_s3_bucket_lifecycle_configuration" "data_lake" {
     }
   }
 
+  # Expire dead-letter manifests after 90 days — they exist for post-mortem
+  # debugging only; the canonical failure record is the Airflow task log.
+  rule {
+    id     = "errors-expiry"
+    status = "Enabled"
+
+    filter {
+      prefix = "comtrade/errors/"
+    }
+
+    expiration {
+      days = 90
+    }
+
+    noncurrent_version_expiration {
+      noncurrent_days = 30
+    }
+  }
+
+  # Athena query results are ephemeral — expire after 30 days.
+  rule {
+    id     = "athena-results-expiry"
+    status = "Enabled"
+
+    filter {
+      prefix = "athena-results/"
+    }
+
+    expiration {
+      days = 30
+    }
+  }
+
+  # Iceberg snapshot metadata files under dbt/silver/ and comtrade/iceberg/.
+  # S3 lifecycle removes orphaned metadata files after the configured retention
+  # window.  Full snapshot expiry (manifest cleanup) still requires running
+  # `VACUUM` via Athena or `expire_snapshots()` via PyIceberg.
+  dynamic "rule" {
+    for_each = var.iceberg_snapshot_retention_days > 0 ? [1] : []
+    content {
+      id     = "iceberg-metadata-expiry"
+      status = "Enabled"
+
+      filter {
+        and {
+          prefix = ""
+          tags = {
+            iceberg = "metadata"
+          }
+        }
+      }
+
+      noncurrent_version_expiration {
+        noncurrent_days = var.iceberg_snapshot_retention_days
+      }
+    }
+  }
+
   # Always clean up incomplete multipart uploads
   rule {
     id     = "abort-incomplete-multipart"
