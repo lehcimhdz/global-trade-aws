@@ -1,11 +1,11 @@
 # global-trade-aws
 
-> Production-grade Apache Airflow pipeline that extracts international trade data from the [UN Comtrade public API](https://comtradeapi.un.org) and lands it in AWS S3 as a Hive-partitioned data lake, with data quality validation, Slack alerting, SLA monitoring, and full IaC.
+> Production-grade ELT data platform that ingests international trade data from the [UN Comtrade public API](https://comtradeapi.un.org), lands it in an Apache Iceberg data lake on AWS S3, transforms it into queryable silver tables via dbt + Amazon Athena, and exposes it through a FastAPI trade API and Amazon QuickSight dashboards — all fully orchestrated by Apache Airflow and provisioned with Terraform.
 
 [![CI](https://github.com/your-org/global-trade-aws/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/global-trade-aws/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%20|%203.11-blue)
 ![Airflow](https://img.shields.io/badge/airflow-2.9.3-017CEE?logo=apache-airflow)
-![Terraform](https://img.shields.io/badge/terraform-%E2%89%A51.5-844FBA?logo=terraform)
+![Terraform](https://img.shields.io/badge/terraform-%E2%89%A51.7-844FBA?logo=terraform)
 ![License](https://img.shields.io/badge/license-MIT-green)
 
 ---
@@ -32,20 +32,33 @@
 
 ## Overview
 
-This project ingests data from all 8 publicly available UN Comtrade API v1 endpoints on a configurable schedule, validates the data quality of each response before it reaches storage, and writes the results to S3 in both raw JSON (bronze layer) and columnar Parquet formats.
+This project implements a four-layer ELT data platform on AWS:
+
+| Layer | Technology | What it produces |
+|-------|-----------|-----------------|
+| **① Ingest** | Airflow 2.9 + 9 DAGs | Raw JSON (bronze) + Parquet on S3 |
+| **② Bronze** | PyIceberg + AWS Glue | ACID Iceberg tables with schema evolution |
+| **③ Silver** | dbt-athena + Amazon Athena | `trade_flows` and `reporter_summary` Iceberg tables |
+| **④ Serve** | FastAPI on Lambda + QuickSight | REST API + SPICE BI dashboards |
 
 **Key properties:**
 
 | Property | Detail |
 |----------|--------|
-| Orchestrator | Apache Airflow 2.9.3 with CeleryExecutor |
-| API | UN Comtrade Public API v1 (rate-limited, ~1 req/s) |
-| Storage | AWS S3, Hive-partitioned (`type=X/freq=Y/year=YYYY/month=MM/`) |
-| Data quality | 7-check suite on every API response before it is promoted |
-| Alerting | Slack notifications on task failure and SLA miss |
+| Orchestrator | Apache Airflow 2.9.3 with CeleryExecutor (dev: Docker Compose · prod: AWS MWAA) |
+| API source | UN Comtrade Public API v1 — 8 endpoints, rate-limited (~1 req/s) |
+| Bronze storage | AWS S3, Hive-partitioned + Apache Iceberg ACID tables (AWS Glue catalog) |
+| Transformation | dbt-athena-community 1.8.4 — staging views + silver Iceberg tables |
+| Query engine | Amazon Athena (dedicated workgroup, 10 GB scan limit, 5 named queries) |
+| Data serving | FastAPI Lambda Function URL · QuickSight SPICE datasets |
+| Data quality | 7-check suite on every API response; schema drift detection |
+| Observability | CloudWatch dashboard (7 widgets) + Athena cost alarm + OpenLineage |
+| Alerting | Slack on task failure and SLA miss; dbt error metrics to CloudWatch |
 | Secrets | AWS Secrets Manager (local dev: `LocalFilesystemBackend`) |
-| IaC | Terraform (S3, IAM, Secrets Manager) |
+| Security | Lake Formation column-level access; Amazon Macie monthly PII scan |
+| IaC | Terraform — 16 `.tf` files covering all AWS resources |
 | CI | GitHub Actions — lint → unit tests → full tests → terraform validate |
+| Tests | 633 unit tests · 3 skipped · zero Airflow mocks for business logic |
 
 ---
 
@@ -53,44 +66,58 @@ This project ingests data from all 8 publicly available UN Comtrade API v1 endpo
 
 ```mermaid
 flowchart TD
-    subgraph Airflow ["Airflow Stack (Docker Compose / MWAA)"]
-        Scheduler["Scheduler"]
-        Worker["Celery Worker"]
-        Webserver["Webserver :8080"]
+    subgraph Ingest ["① Ingest — 9 Airflow DAGs"]
+        UN["UN Comtrade\nPublic API v1"]
+        AW["Airflow Workers\nDocker Compose / MWAA"]
+        UN -->|"JSON"| AW
     end
 
-    subgraph Plugins ["plugins/comtrade/"]
-        Client["client.py\nrate-limit · retry"]
-        Factory["dag_factory.py\nextract · validate · parquet"]
-        Validator["validator.py\n7 quality checks"]
-        Callbacks["callbacks.py\nSlack alerts"]
+    subgraph Bronze ["② Bronze — S3 + Iceberg"]
+        S3J["Raw JSON\nHive-partitioned"]
+        S3P["Parquet\n(optional)"]
+        ICE["Iceberg tables\nGlue catalog"]
+        AW -->|"validate · write"| S3J & S3P & ICE
     end
 
-    subgraph AWS
-        SM["Secrets Manager\nAirflow Variables"]
-        S3["S3 Data Lake\nbronze JSON · Parquet"]
+    subgraph Silver ["③ Silver — dbt + Athena"]
+        DBT["comtrade_dbt DAG\ndbt deps → freshness → staging → silver → test"]
+        TF["trade_flows\nIceberg table"]
+        RS["reporter_summary\nIceberg table"]
+        ICE -->|"monthly"| DBT
+        DBT --> TF & RS
     end
 
-    API["UN Comtrade\nPublic API v1"]
-    Slack["Slack\nWorkspace"]
+    subgraph Serve ["④ Serve"]
+        API["Trade API\nFastAPI + Lambda"]
+        QS["QuickSight\nSPICE datasets"]
+        TF & RS --> API & QS
+    end
 
-    Scheduler -->|"triggers"| Worker
-    Worker --> Factory
-    Factory --> Client
-    Client -->|"GET /public/v1/..."| API
-    API -->|"JSON"| Client
-    Factory --> Validator
-    Factory -->|"PUT objects"| S3
-    Factory --> Callbacks
-    Callbacks -->|"POST webhook"| Slack
-    SM -->|"Variables at runtime"| Worker
+    subgraph CrossCut ["Cross-cutting"]
+        CW["CloudWatch\n7 widgets + alarm"]
+        Slack["Slack\nalerts"]
+        LF["Lake Formation\ncolumn-level ACL"]
+        Macie["Macie\nmonthly PII scan"]
+        OL["OpenLineage\nMarquez"]
+        SM["Secrets Manager\n9 Airflow Variables"]
+    end
+
+    AW -.->|"metrics"| CW
+    DBT -.->|"DbtRunDuration\nDbtModelsErrored"| CW
+    AW -.->|"failure / SLA"| Slack
+    AW -.->|"lineage events"| OL
+    SM -.->|"runtime config"| AW
+    LF -.->|"access control"| TF & RS
+    Macie -.->|"scan"| S3J
 ```
 
 ---
 
 ## Pipeline
 
-Every DAG runs the same three-task sequence:
+### Ingestion (bronze) — 8 endpoint DAGs
+
+Every ingestion DAG runs the same three-task sequence:
 
 ```mermaid
 flowchart LR
@@ -98,18 +125,18 @@ flowchart LR
 
     subgraph Pipeline
         direction LR
-        E["extract_and_store_raw\n─────────────────\n① Resolve Variables\n② Rate-limit sleep 1.1 s\n③ GET API endpoint\n④ Retry on 429 / 5xx\n⑤ PUT raw JSON → S3"]
-        V["validate_bronze\n─────────────────\n① Read JSON from S3\n② Run 7 quality checks\n③ Fail fast on ERROR\n④ Warn on duplicates\n   & negative values"]
+        E["extract_and_store_raw\n─────────────────\n① Resolve Variables\n② Rate-limit sleep 1.1 s\n③ GET API endpoint\n④ Retry on 429 / 5xx\n⑤ PUT raw JSON → S3\n⑥ Iceberg ACID append"]
+        V["validate_bronze\n─────────────────\n① Read JSON from S3\n② Run 7 quality checks\n③ Emit CloudWatch metrics\n④ Schema drift detection\n⑤ OpenLineage event"]
         P["convert_to_parquet\n─────────────────\n① Read JSON from S3\n② Flatten records\n③ PUT Parquet → S3\n   (skipped if disabled)"]
     end
 
-    FAIL(["DataQualityError\n→ task marked Failed\n→ Slack alert"]):::fail
-    OK(["S3 objects written\n.json + .parquet"]):::ok
+    FAIL(["DataQualityError\n→ task Failed\n→ dead-letter S3\n→ Slack alert"]):::fail
+    OK(["S3 objects written\n.json + .parquet\nIceberg snapshot"]):::ok
 
     T --> E
-    E -->|"S3 key\nvia XCom"| V
-    V -->|PASS\nS3 key via XCom| P
-    V -->|FAIL| FAIL
+    E -->|"S3 key via XCom"| V
+    V -->|"PASS"| P
+    V -->|"FAIL"| FAIL
     P --> OK
 
     classDef trigger fill:#6c757d,color:#fff,stroke:none
@@ -117,53 +144,61 @@ flowchart LR
     classDef ok fill:#198754,color:#fff,stroke:none
 ```
 
-### S3 key layout
+### Transformation (silver) — `comtrade_dbt`
+
+Runs monthly after the ingestion window closes. Transforms Iceberg bronze tables into silver via dbt + Athena, and emits three CloudWatch metrics (`DbtRunDuration`, `DbtModelsErrored`, `DbtTestsFailed`) for every phase.
+
+```
+dbt_deps → dbt_source_freshness → dbt_run_staging → dbt_run_silver → dbt_test
+```
+
+`dbt_source_freshness` blocks downstream runs when bronze data is older than 35 days, preventing stale data from reaching the silver layer.
+
+### S3 key layout (bronze)
 
 ```
 s3://<COMTRADE_S3_BUCKET>/
   comtrade/
     <endpoint>/
-      type=<typeCode>/        ← omitted when endpoint has no typeCode
-        freq=<freqCode>/      ← omitted when endpoint has no freqCode
+      type=<typeCode>/
+        freq=<freqCode>/
           year=<YYYY>/
             month=<MM>/
-              <run_id>.json                        ← always written
-              fmt=parquet/
-                <run_id>.parquet                   ← written when COMTRADE_WRITE_PARQUET=true
-```
-
-Partition directories use `key=value` notation — AWS Glue and Athena discover the schema without manual table configuration.
-
-**Examples:**
-
-```
-comtrade/preview/type=C/freq=A/year=2024/month=03/scheduled__2024-03-01T00-00-00+00-00.json
-comtrade/getMBS/series_type=T35/year=2024/month=03/scheduled__2024-03-01T00-00-00+00-00.json
-comtrade/getComtradeReleases/year=2024/month=03/scheduled__2024-03-01T00-00-00+00-00.json
+              <run_id>.json                   ← always written
+              fmt=parquet/<run_id>.parquet     ← when COMTRADE_WRITE_PARQUET=true
+    iceberg/<endpoint>/                       ← Iceberg data files + metadata
+  dbt/silver/                                 ← Silver Iceberg tables
+  athena-results/                             ← Athena query results (30d lifecycle)
+  errors/                                     ← Dead-letter manifests (90d lifecycle)
 ```
 
 ---
 
 ## DAGs
 
-| DAG | Endpoint | Schedule | SLA | Task config |
-|-----|----------|----------|-----|-------------|
-| `comtrade_preview` | `/preview/{t}/{f}/{c}` | Monthly | 8 h | required: reporterCode, period · numeric: primaryValue |
-| `comtrade_preview_tariffline` | `/previewTariffline/{t}/{f}/{c}` | Monthly | 8 h | dedup: reporterCode, partnerCode, cmdCode, flowCode, period, motCode |
-| `comtrade_world_share` | `/getWorldShare/{t}/{f}` | Monthly | 8 h | required: reporterCode, period · numeric: share |
-| `comtrade_metadata` | `/getMetadata/{t}/{f}/{c}` | Weekly | 4 h | no period check |
-| `comtrade_mbs` | `/getMBS` | Monthly | 8 h | no period check (own period_type field) |
-| `comtrade_da_tariffline` | `/getDATariffline/{t}/{f}/{c}` | Monthly | 8 h | required: reporterCode · numeric: primaryValue |
-| `comtrade_da` | `/getDA/{t}/{f}/{c}` | Monthly | 8 h | required: reporterCode · numeric: primaryValue |
-| `comtrade_releases` | `/getComtradeReleases` | Daily | 2 h | minimal checks |
+### Ingestion DAGs
 
-> `t` = typeCode, `f` = freqCode, `c` = clCode
+| DAG | Endpoint | Schedule | SLA |
+|-----|----------|----------|-----|
+| `comtrade_preview` | `/preview/{t}/{f}/{c}` | Monthly | 8 h |
+| `comtrade_preview_tariffline` | `/previewTariffline/{t}/{f}/{c}` | Monthly | 8 h |
+| `comtrade_world_share` | `/getWorldShare/{t}/{f}` | Monthly | 8 h |
+| `comtrade_metadata` | `/getMetadata/{t}/{f}/{c}` | Weekly | 4 h |
+| `comtrade_mbs` | `/getMBS` | Monthly | 8 h |
+| `comtrade_da_tariffline` | `/getDATariffline/{t}/{f}/{c}` | Monthly | 8 h |
+| `comtrade_da` | `/getDA/{t}/{f}/{c}` | Monthly | 8 h |
+| `comtrade_releases` | `/getComtradeReleases` | Daily | 2 h |
 
-All DAGs share:
-- `retries=2`, `retry_delay=5 min`
-- `catchup=False`
-- `on_failure_callback` on every task → Slack
-- `sla_miss_callback` on the DAG → Slack
+> `t` = typeCode · `f` = freqCode · `c` = clCode
+
+### Transformation & utility DAGs
+
+| DAG | Schedule | Tasks | Purpose |
+|-----|----------|-------|---------|
+| `comtrade_dbt` | Monthly | 5 | Silver layer — dbt deps → freshness → staging → silver → test |
+| `comtrade_backfill` | Manual (`schedule=None`) | 2 | Historical backfill — supports `preview`, `previewTariffline`, `getMBS` |
+
+All DAGs share: `retries=1`, `retry_delay=10 min`, `catchup=False`, `on_failure_callback` on every task (Slack), `sla_miss_callback` on the DAG (Slack).
 
 ---
 
@@ -172,7 +207,11 @@ All DAGs share:
 ```
 global-trade-aws/
 │
-├── dags/                            One DAG file per Comtrade endpoint
+├── api/                             FastAPI trade API (Lambda deployment)
+│   ├── main.py                      Routes: /health · /v1/reporters · /v1/reporters/{iso}/summary · /v1/trade-flows
+│   └── athena.py                    Synchronous Athena query runner (start → poll → paginate)
+│
+├── dags/                            One DAG file per orchestration unit (10 total)
 │   ├── comtrade_preview.py
 │   ├── comtrade_preview_tariffline.py
 │   ├── comtrade_world_share.py
@@ -180,57 +219,93 @@ global-trade-aws/
 │   ├── comtrade_mbs.py
 │   ├── comtrade_da_tariffline.py
 │   ├── comtrade_da.py
-│   └── comtrade_releases.py
+│   ├── comtrade_releases.py
+│   ├── comtrade_dbt.py              Silver layer orchestration (PythonOperator + dbt metrics)
+│   └── comtrade_backfill.py         Historical backfill (schedule=None)
+│
+├── dbt/                             dbt project for the silver layer
+│   ├── dbt_project.yml
+│   ├── profiles.yml                 dbt-athena-community (dev + prod targets)
+│   ├── packages.yml
+│   ├── models/
+│   │   ├── staging/                 Iceberg-backed views (stg_preview, stg_mbs)
+│   │   └── silver/                  Iceberg tables partitioned by period
+│   │       ├── trade_flows.sql      Bilateral commodity-level aggregations
+│   │       └── reporter_summary.sql Per-country export/import/balance totals
+│   └── tests/
+│       └── assert_no_negative_trade_value.sql
 │
 ├── plugins/
 │   └── comtrade/                    Auto-added to sys.path by Airflow
-│       ├── __init__.py
-│       ├── client.py                API calls · rate-limit · retry
+│       ├── client.py                HTTP calls · rate-limit · retry
 │       ├── s3_writer.py             S3 upload helpers · key builder
-│       ├── dag_factory.py           Shared @task factories (DRY across 8 DAGs)
-│       ├── validator.py             Pure-Python quality checks (no Airflow dep)
-│       └── callbacks.py             Slack failure & SLA miss notifications
+│       ├── dag_factory.py           Shared @task factories (DRY across 8 ingestion DAGs)
+│       ├── validator.py             Pure-Python quality checks (7-check suite)
+│       ├── callbacks.py             Slack alerts · SLA miss · dead-letter S3 manifests
+│       ├── metrics.py               CloudWatch metrics (ingestion validation + dbt runs)
+│       ├── iceberg.py               PyIceberg writer — ACID appends, schema evolution
+│       ├── lineage.py               OpenLineage event emission to Marquez
+│       └── schema.py                Schema drift detection + S3 baseline tracking
 │
 ├── tests/
-│   ├── conftest.py                  sys.path + base fixtures
-│   ├── unit/                        Fast; no Airflow required
-│   │   ├── conftest.py
-│   │   ├── test_client.py           24 tests
-│   │   ├── test_s3_writer.py        13 tests
-│   │   ├── test_dag_factory.py      20 tests (uses .function to bypass @task)
-│   │   ├── test_validator.py        63 tests
-│   │   └── test_callbacks.py        34 tests
-│   └── dag_integrity/               DagBag-based structure tests
-│       └── test_dag_integrity.py    Verifies all 8 DAGs import cleanly
+│   ├── unit/                        633 tests — no Airflow required for business logic
+│   │   ├── test_client.py
+│   │   ├── test_s3_writer.py
+│   │   ├── test_dag_factory.py
+│   │   ├── test_validator.py
+│   │   ├── test_callbacks.py
+│   │   ├── test_metrics.py          Ingestion + dbt CloudWatch metrics (42 tests)
+│   │   ├── test_iceberg.py
+│   │   ├── test_lineage.py
+│   │   ├── test_schema.py
+│   │   ├── test_dbt_project.py
+│   │   ├── test_backfill_dag.py     (Airflow-gated)
+│   │   ├── test_api.py              FastAPI endpoints (89 tests)
+│   │   ├── test_api_terraform.py
+│   │   ├── test_athena_terraform.py
+│   │   ├── test_quicksight_terraform.py
+│   │   ├── test_cloudwatch_terraform.py  Dashboard + alarm
+│   │   ├── test_lake_formation_terraform.py
+│   │   └── test_macie_terraform.py
+│   ├── dag_integrity/               DagBag structural tests (all 10 DAGs)
+│   └── integration/                 Multi-component smoke tests (moto S3)
 │
-├── terraform/                       IaC for AWS resources
-│   ├── main.tf                      Provider + backend config
-│   ├── s3.tf                        Data lake bucket
-│   ├── iam.tf                       IAM user + policy
-│   ├── secrets.tf                   Secrets Manager secrets
-│   ├── variables.tf
-│   ├── outputs.tf
-│   └── environments/
-│       ├── dev.tfvars
-│       └── prod.tfvars
+├── terraform/                       IaC — 16 files, all AWS resources
+│   ├── main.tf                      Provider + optional S3 remote backend
+│   ├── variables.tf                 All input variables with validation
+│   ├── outputs.tf                   Post-apply URLs, ARNs, and next-steps checklist
+│   ├── s3.tf                        Data lake bucket + 5 lifecycle rules
+│   ├── iam.tf                       IAM roles + least-privilege policies
+│   ├── glue.tf                      Glue Data Catalog database (comtrade)
+│   ├── athena.tf                    Workgroup (10 GB limit) + 5 named queries
+│   ├── cloudwatch.tf                Dashboard (7 widgets) + Athena cost alarm
+│   ├── lake_formation.tf            Column-level access (Airflow · API · QuickSight)
+│   ├── macie.tf                     Monthly PII scan + KMS findings export
+│   ├── secrets.tf                   Secrets Manager (9 Airflow Variables)
+│   ├── mwaa.tf                      Managed Airflow — staging/prod only
+│   ├── ecr.tf                       Docker image registry (immutable tags)
+│   ├── vpc.tf                       VPC + subnets + NAT Gateway (for MWAA)
+│   ├── api.tf                       Lambda + Function URL (CORS-enabled)
+│   └── quicksight.tf                SPICE datasets + Athena data source
 │
 ├── .github/
 │   └── workflows/
-│       └── ci.yml                   4-job CI pipeline
+│       ├── ci.yml                   lint → unit → full → terraform validate
+│       └── deploy.yml               ECR build → dev → staging → prod (gated)
 │
 ├── scripts/
-│   └── bootstrap_secrets.sh         Push .env → Secrets Manager
+│   ├── bootstrap_secrets.sh         Push .env values → Secrets Manager
+│   └── trigger_backfill.sh          Convenience wrapper for comtrade_backfill DAG
 │
 ├── config/
 │   └── airflow_variables.json       Local dev Variable seed file
 │
 ├── docker-compose.yml               Postgres · Redis · scheduler · worker · webserver · triggerer
-├── Makefile                         Unified developer interface
+├── Dockerfile                       Custom image (apache/airflow:2.9.3-python3.11 + deps)
+├── Makefile                         Unified developer interface (40+ targets)
 ├── pyproject.toml                   black · isort · mypy config
-├── .pre-commit-config.yaml          black · isort · flake8 · mypy · detect-secrets · terraform fmt
-├── requirements.txt
-├── .env.example
-└── ROADMAP.md
+├── ROADMAP.md                       All 7 tiers — 100% complete
+└── docs/                            Extended documentation (8 guides)
 ```
 
 ---
@@ -240,8 +315,9 @@ global-trade-aws/
 ### Prerequisites
 
 - **Docker Engine 24+** and **Docker Compose v2** (`docker compose version`)
-- **AWS account** with an S3 bucket and credentials
-- *(Production only)* **Terraform 1.5+** and **AWS CLI**
+- **AWS account** with an S3 bucket and credentials (or an IAM role on EC2/ECS)
+- *(Silver layer)* **Athena** enabled in the target region
+- *(Production)* **Terraform 1.7+** and **AWS CLI**
 
 ### 1. Clone and configure
 
@@ -259,9 +335,6 @@ AWS_ACCESS_KEY_ID=AKIA...
 AWS_SECRET_ACCESS_KEY=...
 AWS_DEFAULT_REGION=us-east-1
 COMTRADE_S3_BUCKET=my-data-lake-bucket
-
-# Optional — enables Slack failure + SLA alerts
-COMTRADE_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/T.../B.../...
 ```
 
 On Linux also run:
@@ -283,35 +356,31 @@ pre-commit install
 make up
 ```
 
-Wait ~60 seconds for all containers to become healthy:
-
-```bash
-docker compose ps   # all should show "healthy"
-```
+Wait ~60 seconds then verify: `docker compose ps` — all services should show `healthy`.
 
 Airflow UI → **http://localhost:8080** (`admin` / `admin`)
 
 ### 4. Seed Airflow Variables
 
 ```bash
-make init-variables
+make import-vars
 ```
 
 ### 5. Run the tests
 
 ```bash
-make test           # unit tests only (fast, no Airflow needed)
-make test-all       # full suite including dag integrity tests
+make test        # unit tests (no Airflow needed, ~1 s)
+make test-full   # full suite including DAG integrity
 ```
 
-### 6. Trigger a DAG
+### 6. Trigger an ingestion DAG
 
 From the UI: unpause `comtrade_preview` → click **Trigger DAG**.
 
 Or from the CLI:
 
 ```bash
-docker compose exec airflow-webserver airflow dags trigger comtrade_preview
+make trigger DAG=comtrade_preview
 ```
 
 ### 7. Verify data in S3
@@ -320,27 +389,79 @@ docker compose exec airflow-webserver airflow dags trigger comtrade_preview
 aws s3 ls s3://<your-bucket>/comtrade/preview/ --recursive | sort | tail -5
 ```
 
+### 8. Run the dbt silver layer
+
+```bash
+make dbt-full   # deps → run (staging + silver) → test
+```
+
+Or trigger the `comtrade_dbt` DAG in the UI for the full Airflow-orchestrated run.
+
+### 9. Query the silver layer
+
+```bash
+# Via the named queries in Athena (provisioned by Terraform):
+aws athena list-named-queries --work-group <name-prefix>-comtrade
+
+# Via the trade API (after terraform apply with enable_api=true):
+curl "<api-url>/v1/reporters?period=2022" | jq '.[:3]'
+```
+
 ---
 
 ## Makefile reference
 
 ```
-make up                  Start the full Docker Compose stack
-make down                Stop the stack
+── Docker Compose ──────────────────────────────────────────────────
+make up                  Start the full stack (background)
+make down                Stop the stack (data preserved)
+make down-volumes        Stop + delete all volumes (destructive)
 make restart             down + up
+make logs                Tail scheduler and worker logs
 
-make test                Run unit tests (no Airflow install needed)
-make test-all            Run full suite (unit + dag integrity)
-make lint                Run all pre-commit hooks on every file
-make format              Run black + isort formatters
+── Development ─────────────────────────────────────────────────────
+make install             Install runtime dependencies
+make install-dev         Install runtime + dev/test deps + pre-commit
+make format              Run black + isort auto-formatters
+make lint                Run black · isort · flake8 checks
+make type-check          Run mypy on the plugin package
+make check               lint + type-check
 
-make init-variables      Import Airflow Variables from config/airflow_variables.json
-make bootstrap-secrets   Push .env values to AWS Secrets Manager (after tf-apply)
+── Testing ─────────────────────────────────────────────────────────
+make test                Unit tests (no Airflow required, ~1 s)
+make test-full           Full suite: unit + DAG integrity + integration
+make test-integration    Integration smoke tests only
+make test-cov            Full suite with HTML coverage report
+make test-api            Trade API unit tests only
 
+── Airflow ─────────────────────────────────────────────────────────
+make init                Initialise Airflow DB (run once before first up)
+make import-vars         Import Variables from config/airflow_variables.json
+make trigger DAG=<id>    Trigger a DAG run manually
+
+── dbt ─────────────────────────────────────────────────────────────
+make dbt-install         Install dbt + dbt-athena-community adapter
+make dbt-deps            Install dbt packages
+make dbt-run             Run all models (staging + silver)
+make dbt-run-staging     Run staging views only
+make dbt-run-silver      Run silver Iceberg tables only
+make dbt-test            Run schema + custom tests
+make dbt-full            deps → run → test (full pipeline)
+
+── Terraform ───────────────────────────────────────────────────────
 make tf-init             terraform init
-make tf-plan   ENV=dev   terraform plan  for the given environment
-make tf-apply  ENV=dev   terraform apply for the given environment
-make tf-destroy ENV=dev  terraform destroy (requires confirmation)
+make tf-plan   ENV=dev   Preview changes for environment
+make tf-apply  ENV=dev   Apply changes (prompts for confirmation)
+make tf-destroy ENV=dev  Destroy infrastructure (prompts for confirmation)
+make tf-fmt              Auto-format Terraform files
+make bootstrap-secrets   Push .env values → Secrets Manager (post-apply)
+
+── API ─────────────────────────────────────────────────────────────
+make api-build           Bundle api/ → build/api.zip (required before tf-apply)
+make api-local           Run trade API locally (uvicorn)
+
+── Backfill ────────────────────────────────────────────────────────
+make backfill ENDPOINT=preview PERIODS=2020,2021,2022
 ```
 
 ---
@@ -349,11 +470,19 @@ make tf-destroy ENV=dev  terraform destroy (requires confirmation)
 
 ### Airflow Variables
 
-All pipeline parameters are Airflow Variables read at task execution time (not DAG parse time). In production they are backed by AWS Secrets Manager at `airflow/variables/<NAME>`.
+All pipeline parameters are Airflow Variables resolved at task runtime (not parse time). In production they are backed by AWS Secrets Manager at `airflow/variables/<NAME>`.
+
+#### Core
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `COMTRADE_S3_BUCKET` | **required** | Target S3 bucket name |
+| `COMTRADE_WRITE_PARQUET` | `false` | Set `"true"` to enable Parquet conversion |
+
+#### Trade filters
+
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `COMTRADE_TYPE_CODE` | `C` | Trade type — `C` commodities, `S` services |
 | `COMTRADE_FREQ_CODE` | `A` | Frequency — `A` annual, `M` monthly |
 | `COMTRADE_CL_CODE` | `HS` | Classification — `HS`, `SITC`, `BEC`, `EB02` |
@@ -362,46 +491,36 @@ All pipeline parameters are Airflow Variables read at task execution time (not D
 | `COMTRADE_PARTNER_CODE` | _(all)_ | Partner country code(s) |
 | `COMTRADE_CMD_CODE` | _(all)_ | Commodity code(s) |
 | `COMTRADE_FLOW_CODE` | _(all)_ | `X` export, `M` import, `re-X`, `re-M` |
-| `COMTRADE_WRITE_PARQUET` | `false` | Set `true` to write Parquet alongside JSON |
-| `COMTRADE_SLACK_WEBHOOK_URL` | _(empty)_ | Slack Incoming Webhook URL for alerts |
-| `AWS_ACCESS_KEY_ID` | _(env)_ | AWS key (falls back to IAM role / `~/.aws`) |
-| `AWS_SECRET_ACCESS_KEY` | _(env)_ | AWS secret |
+
+#### dbt
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `COMTRADE_DBT_DIR` | `/opt/airflow/dbt` | Absolute path to the dbt project inside the container |
+| `COMTRADE_DBT_TARGET` | `prod` | dbt target profile — `dev` or `prod` |
+
+#### AWS (can also be set via `.env`)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
 | `AWS_DEFAULT_REGION` | `us-east-1` | AWS region |
+| `AWS_ACCESS_KEY_ID` | _(env)_ | Omit when using IAM roles |
+| `AWS_SECRET_ACCESS_KEY` | _(env)_ | Omit when using IAM roles |
 
 ### Secrets backend
 
-| Environment | Backend | How to switch |
-|-------------|---------|---------------|
-| Local dev | `LocalFilesystemBackend` → `config/airflow_variables.json` | Default in `.env.example` |
-| Production | `SecretsManagerBackend` | Uncomment `AIRFLOW_SECRETS_BACKEND*` in `.env` after `make tf-apply` |
+| Environment | Backend |
+|-------------|---------|
+| Local dev | `LocalFilesystemBackend` → `config/airflow_variables.json` |
+| Production | `SecretsManagerBackend` — enabled by `make tf-apply && make bootstrap-secrets` |
 
 ---
 
 ## Data quality
 
-The `validate_bronze` task runs between extract and Parquet conversion on every DAG run. It is implemented in `plugins/comtrade/validator.py` — a pure-Python module with no Airflow dependency.
+The `validate_bronze` task runs after every extraction. Implemented in `plugins/comtrade/validator.py` — a pure-Python module with no Airflow dependency.
 
 ### Check suite
-
-```mermaid
-flowchart TD
-    A[Raw JSON from S3] --> B{check_envelope\ndict or list?}
-    B -->|FAIL ERROR| Z([DataQualityError])
-    B -->|PASS| C{check_has_data_key\n'data' key is a list?}
-    C -->|FAIL ERROR| Z
-    C -->|PASS| D{check_row_count\n≥ min_rows records?}
-    D -->|FAIL ERROR| Z
-    D -->|PASS| E{check_no_nulls\nrequired columns non-null?}
-    E -->|FAIL ERROR| Z
-    E -->|PASS| F{check_period_format\nmatches YYYY or YYYYMM?}
-    F -->|FAIL ERROR| Z
-    F -->|PASS| G{check_numeric_non_negative\nnumeric cols ≥ 0?}
-    G -->|FAIL WARNING| H[log warning · continue]
-    G -->|PASS| I{check_no_duplicates\nno repeated natural keys?}
-    I -->|FAIL WARNING| H
-    I -->|PASS| J([PASS — S3 key forwarded\nto convert_to_parquet])
-    H --> J
-```
 
 | Check | Severity | Triggered by |
 |-------|----------|-------------|
@@ -413,56 +532,28 @@ flowchart TD
 | `check_numeric_non_negative` | **WARNING** | Numeric column has a value < 0 |
 | `check_no_duplicates` | **WARNING** | Repeated natural key combination |
 
-ERROR failures raise `DataQualityError`, mark the task as failed, and trigger a Slack alert. WARNING failures are logged but the pipeline continues.
+ERROR failures raise `DataQualityError`, fail the task, write a dead-letter manifest to `s3://.../comtrade/errors/` and trigger a Slack alert. WARNING failures are logged but the pipeline continues.
+
+After validation, four CloudWatch metrics are emitted to `Comtrade/Pipeline` (dimensions: `DagId`, `Endpoint`): `RowCount`, `ChecksPassed`, `ChecksFailed`, `JsonBytesWritten`.
 
 ---
 
 ## Alerting & SLA monitoring
 
-```mermaid
-sequenceDiagram
-    participant A as Airflow Worker
-    participant S as Secrets Manager
-    participant Sl as Slack
+Slack alerts fire on every task failure and SLA miss. The same `COMTRADE_SLACK_WEBHOOK_URL` variable is used for both.
 
-    A->>S: Variable.get("COMTRADE_SLACK_WEBHOOK_URL")
-    S-->>A: webhook URL
+**Setup:** Create a Slack Incoming Webhook → add URL to `.env` or `make bootstrap-secrets ENV=prod`.
 
-    Note over A: Task fails after 2 retries
-    A->>Sl: POST /services/... (Block Kit message)
-    Sl-->>A: HTTP 200
+If the variable is unset, callbacks log a warning and return silently — local dev works without Slack.
 
-    Note over A: SLA window exceeded
-    A->>Sl: POST /services/... (SLA miss message)
-    Sl-->>A: HTTP 200
-```
+### SLA windows
 
-### Task failure alerts
-
-Every task (`extract_and_store_raw`, `validate_bronze`, `convert_to_parquet`) has `on_failure_callback=task_failure_callback` set via the `dag_factory`. The Slack message includes:
-
-- DAG ID and task ID
-- Run ID and execution date
-- Exception message (truncated to 400 chars)
-- **View Task Logs** button linking directly to the Airflow log
-
-### SLA miss alerts
-
-Each DAG fires `sla_miss_callback` when it has not completed within its SLA window:
-
-| Schedule | SLA window |
-|----------|-----------|
+| Schedule | SLA |
+|----------|-----|
 | `@monthly` | 8 hours |
 | `@weekly` | 4 hours |
 | `@daily` | 2 hours |
-
-### Setup
-
-1. Create a Slack Incoming Webhook at <https://api.slack.com/messaging/webhooks>
-2. Add to `.env`: `COMTRADE_SLACK_WEBHOOK_URL=https://hooks.slack.com/services/...`
-3. In production: `make bootstrap-secrets ENV=prod`
-
-If the variable is unset, callbacks log a warning and return silently — local development works without a Slack workspace.
+| `comtrade_dbt` | 2 hours per task |
 
 ---
 
@@ -470,26 +561,35 @@ If the variable is unset, callbacks log a warning and return silently — local 
 
 ```
 tests/
-├── unit/                  No Airflow install required — always runs in CI
-│   ├── test_client.py      24 tests — HTTP mocking, retry, rate-limit
-│   ├── test_s3_writer.py   13 tests — moto mock_aws
-│   ├── test_dag_factory.py 20 tests — .function attribute to bypass @task
-│   ├── test_validator.py   63 tests — every check function, run_checks, assert_quality
-│   └── test_callbacks.py   34 tests — payload structure, HTTP mocking, error isolation
-└── dag_integrity/          Requires Airflow — runs in full-tests CI job
-    └── test_dag_integrity.py
-        ├── All 8 DAGs import without errors
-        ├── Correct schedule, tags, catchup, description, retries
-        ├── Exactly 3 tasks per DAG with correct task IDs
-        └── Dependency chain: extract → validate → parquet
+├── unit/          633 tests — no Airflow install required for business logic
+│   ├── test_client.py               HTTP client: URL construction, retry, rate-limit
+│   ├── test_s3_writer.py            S3 key builder + upload helpers (moto)
+│   ├── test_dag_factory.py          extract / validate / parquet task logic
+│   ├── test_validator.py            All 7 checks, run_checks, assert_quality
+│   ├── test_callbacks.py            Slack payloads, dead-letter, SLA miss
+│   ├── test_metrics.py              Ingestion + dbt CloudWatch metrics (42 tests)
+│   ├── test_iceberg.py              PyIceberg writer (sys.modules mock)
+│   ├── test_lineage.py              OpenLineage event builder
+│   ├── test_schema.py               Schema drift detection
+│   ├── test_dbt_project.py          dbt YAML structure + SQL coverage (no dbt needed)
+│   ├── test_backfill_dag.py         Backfill DAG structure (Airflow-gated)
+│   ├── test_api.py                  FastAPI endpoints (89 tests)
+│   ├── test_api_terraform.py        Lambda + Function URL TF config
+│   ├── test_athena_terraform.py     Workgroup + 5 named queries TF config
+│   ├── test_quicksight_terraform.py SPICE datasets TF config (76 tests)
+│   ├── test_cloudwatch_terraform.py Dashboard + Athena alarm TF config
+│   ├── test_lake_formation_terraform.py LF permissions TF config
+│   └── test_macie_terraform.py      Macie scan TF config
+├── dag_integrity/  DagBag tests — all 10 DAGs parse cleanly, correct structure
+└── integration/    32 multi-component smoke tests against moto S3
 ```
 
 ```bash
-make test        # 121 unit tests  (~0.3 s)
-make test-all    # + dag integrity (~30 s with Airflow installed)
+make test        # unit tests only  (~1 s)
+make test-full   # full suite       (~30 s with Airflow installed)
 ```
 
-Modules that depend on Airflow use `pytest.importorskip("airflow")` at the top — they skip gracefully when Airflow is not installed rather than failing.
+Tests that depend on Airflow skip automatically (`pytest.importorskip`) when Airflow is not installed. No business-logic module imports Airflow at module level.
 
 ---
 
@@ -499,66 +599,82 @@ Modules that depend on Airflow use `pytest.importorskip("airflow")` at the top �
 flowchart LR
     Push["git push /\nPull Request"]
 
-    subgraph CI ["GitHub Actions"]
+    subgraph CI ["GitHub Actions — ci.yml"]
         L["lint\nblack · isort · flake8\nmypy · detect-secrets"]
-        U["unit-tests\npython 3.11\n121 tests · ~5 s"]
-        F["full-tests\nmatrix: py3.10 + py3.11\n+ dag integrity"]
+        U["unit-tests\npython 3.11\n633 tests · ~5 s"]
+        F["full-tests\nmatrix: py3.10 + py3.11\n+ dag integrity + integration"]
         T["terraform-validate\ninit -backend=false\n+ validate"]
         G(["ci-pass\n(required gate)"])
     end
 
+    subgraph CD ["GitHub Actions — deploy.yml"]
+        B["build-push\nDocker → ECR"]
+        D["deploy-dev\ntf apply (MWAA off)"]
+        S["deploy-staging\n(manual approval)\ntf apply + S3 sync"]
+        P["deploy-prod\n(manual approval)\ntf apply + S3 sync"]
+    end
+
     Push --> L & U & T
-    L --> G
-    U --> G
-    T --> G
-    U --> F
-    F --> G
+    L & U & T --> G
+    U --> F --> G
+    G --> B --> D --> S --> P
 ```
 
-All four jobs must pass before a pull request can be merged. The `ci-pass` job acts as the single branch protection check.
+All four CI jobs must pass before a pull request can be merged. The `ci-pass` job acts as the single branch protection check. The deploy workflow is triggered on merges to `main` only.
 
 ---
 
 ## Infrastructure (Terraform)
 
+All infrastructure is codified in `terraform/`. Variables control which optional components are enabled per environment.
+
 ```
 terraform/
-├── main.tf        Provider (~5.0) · backend config
-├── s3.tf          Data lake bucket · versioning · lifecycle rules
-├── iam.tf         IAM user · inline policy (s3:PutObject + s3:GetObject)
-├── secrets.tf     Secrets Manager secrets for all Airflow Variables
-├── variables.tf   environment · project_name · aws_region · …
-├── outputs.tf     bucket_name · iam_user_arn · secret_arns
-└── environments/
-    ├── dev.tfvars
-    └── prod.tfvars
+├── main.tf            Provider (aws ~5.0) + optional S3 remote backend
+├── variables.tf       environment · project_name · aws_region · lifecycle days ·
+│                      MWAA class/workers · QuickSight · API · Iceberg retention ·
+│                      Athena alarm threshold
+├── outputs.tf         bucket_name · dashboard_url · api_endpoint_url · …
+│
+├── s3.tf              Data lake bucket — versioning · SSE-S3 · public access block ·
+│                      5 lifecycle rules (raw JSON → GLACIER_IR · Parquet → INTELLIGENT_TIERING ·
+│                      errors 90d · athena-results 30d · Iceberg metadata)
+├── iam.tf             airflow role/policy · airflow_dev user (dev only)
+├── glue.tf            comtrade Glue database (Iceberg catalog)
+├── athena.tf          comtrade workgroup (10 GB limit · CW metrics on) · 5 named queries
+├── cloudwatch.tf      Dashboard (4 ingestion + 2 dbt + 1 errors widgets) · Athena alarm
+├── lake_formation.tf  S3 data location · LF tags · column-level permissions per role
+├── macie.tf           Macie session · KMS key · findings bucket · monthly job · filter
+├── secrets.tf         9 Secrets Manager secrets for Airflow Variables
+│
+├── mwaa.tf            MWAA environment (enable_mwaa=true for staging/prod)
+├── ecr.tf             Airflow image registry (immutable tags · scan on push)
+├── vpc.tf             VPC · 2 public + 2 private subnets · NAT Gateway
+├── api.tf             Lambda function + Function URL (enable_api=true)
+└── quicksight.tf      Athena data source + 2 SPICE datasets (enable_quicksight=true)
 ```
 
 ```bash
 make tf-plan  ENV=dev    # preview changes
-make tf-apply ENV=dev    # apply (requires AWS credentials)
-make bootstrap-secrets   # populate Secrets Manager from .env
+make tf-apply ENV=dev    # apply (prompts for confirmation)
+make bootstrap-secrets   # populate Secrets Manager from .env (post-apply)
 ```
 
-### IAM policy (minimum required)
+### Optional components
 
-```json
-{
-  "Version": "2012-10-17",
-  "Statement": [
-    {
-      "Effect": "Allow",
-      "Action": ["s3:PutObject", "s3:GetObject"],
-      "Resource": "arn:aws:s3:::<COMTRADE_S3_BUCKET>/comtrade/*"
-    },
-    {
-      "Effect": "Allow",
-      "Action": ["secretsmanager:GetSecretValue"],
-      "Resource": "arn:aws:secretsmanager:<region>:<account>:secret:airflow/variables/*"
-    }
-  ]
-}
-```
+| Feature | Variable | Default |
+|---------|---------|---------|
+| AWS MWAA (managed Airflow) | `enable_mwaa` | `false` |
+| Trade API (Lambda) | `enable_api` | `false` |
+| QuickSight dashboards | `enable_quicksight` | `false` |
+
+### Key variables
+
+| Variable | Default | Effect |
+|----------|---------|--------|
+| `data_lake_lifecycle_transition_days` | `90` | Days before raw JSON moves to GLACIER_IR |
+| `iceberg_snapshot_retention_days` | `90` | Iceberg metadata noncurrent version expiry |
+| `athena_bytes_scanned_alarm_gb` | `5` | CloudWatch alarm threshold (GB per 5 min) |
 
 ---
 
@@ -566,11 +682,12 @@ make bootstrap-secrets   # populate Secrets Manager from .env
 
 | Document | Description |
 |----------|-------------|
-| [docs/architecture.md](docs/architecture.md) | System architecture, component responsibilities, infrastructure topology |
-| [docs/data-flow.md](docs/data-flow.md) | End-to-end pipeline flow, S3 structure, XCom chain, retry/error table |
+| [docs/architecture.md](docs/architecture.md) | Full system architecture — all 4 layers, component responsibilities, technology stack |
+| [docs/data-flow.md](docs/data-flow.md) | End-to-end data flow, S3 layout, XCom chain, retry/error table |
+| [docs/dbt.md](docs/dbt.md) | dbt silver layer — models, tests, Athena adapter, freshness checks |
 | [docs/api-reference.md](docs/api-reference.md) | All 8 Comtrade endpoints, parameters, and rate limits |
 | [docs/configuration.md](docs/configuration.md) | All Airflow Variables and `.env` settings with scenario examples |
-| [docs/plugins.md](docs/plugins.md) | Plugin internals — client, S3 writer, factory, validator, callbacks |
-| [docs/operations.md](docs/operations.md) | Deployment, alerting setup, SLA monitoring, troubleshooting, IAM |
-| [docs/testing.md](docs/testing.md) | Test suite structure, how to run, mocking strategy, CI integration |
-| [ROADMAP.md](ROADMAP.md) | Completed milestones and upcoming work |
+| [docs/plugins.md](docs/plugins.md) | Plugin internals — client, S3 writer, factory, validator, callbacks, metrics, Iceberg |
+| [docs/operations.md](docs/operations.md) | Deployment, monitoring, alerting, troubleshooting, MWAA production setup |
+| [docs/testing.md](docs/testing.md) | Test suite structure, mocking strategy, how to run, CI integration |
+| [ROADMAP.md](ROADMAP.md) | All 7 tiers — 100% complete |

@@ -184,16 +184,48 @@ The same `COMTRADE_SLACK_WEBHOOK_URL` variable is used for SLA alerts.
 
 ### CloudWatch dashboard
 
-After Terraform is applied, the `cloudwatch_dashboard_url` output gives a direct link to the ops-facing dashboard. It shows:
+After Terraform is applied, the `cloudwatch_dashboard_url` output gives a direct link to the ops-facing dashboard. All metrics live under the `Comtrade/Pipeline` namespace.
 
-| Widget | What it tracks |
-|--------|----------------|
-| Row Count per DAG Run | Data volume over time |
-| Quality Gate — Checks Passed vs Failed | DAG health |
-| Check Failure Rate (%) | API error rate |
-| JSON Bytes Written to S3 | Raw data volume |
+**Ingestion widgets** (emitted by `validate_bronze`, dimensions: `DagId` + `Endpoint`):
 
-Metrics are emitted automatically by `validate_bronze` via `metrics.py`. The IAM policy already grants `cloudwatch:PutMetricData` scoped to the `Comtrade/Pipeline` namespace.
+| Widget | Metric | What it tracks |
+|--------|--------|----------------|
+| Row Count per DAG Run | `RowCount` | Data volume per endpoint per run |
+| Quality Gate — Checks Passed vs Failed | `ChecksPassed` / `ChecksFailed` | 7-check suite outcomes |
+| Check Failure Rate (%) | Derived | `ChecksFailed / (ChecksFailed + ChecksPassed)` |
+| JSON Bytes Written to S3 | `JsonBytesWritten` | Raw S3 data volume |
+
+**dbt widgets** (emitted by `comtrade_dbt` PythonOperator tasks, dimensions: `DagId` + `Phase`):
+
+| Widget | Metrics | What it tracks |
+|--------|---------|----------------|
+| dbt Run Duration | `DbtRunDuration` | Wall-clock seconds per phase (staging / silver / test) |
+| dbt Errors and Test Failures | `DbtModelsErrored` / `DbtTestsFailed` | Failed models and tests per phase |
+
+**Athena cost alarm** (`AWS/Athena` namespace, auto-published by Athena):
+
+The `athena-high-bytes-scanned` alarm fires when total `ProcessedBytes` in a 5-minute window exceeds the threshold (default: 5 GB = 50% of the 10 GB per-query hard limit). View and adjust the threshold in `terraform/variables.tf` (`athena_bytes_scanned_alarm_gb`).
+
+### Lake Formation access control
+
+Column-level access to the silver Iceberg tables is governed by Lake Formation (provisioned in `terraform/lake_formation.tf`). The grants in place are:
+
+| Role | Tables | Access |
+|------|--------|--------|
+| Airflow / MWAA | `trade_flows`, `reporter_summary` | `SELECT + ALTER` on all columns |
+| API Lambda | `reporter_summary` | `SELECT` on all columns |
+| API Lambda | `trade_flows` | `SELECT` on 10 public columns (excludes internal codes) |
+| QuickSight | `trade_flows`, `reporter_summary` | `SELECT` on all columns |
+
+If you need to add a new principal, add an `aws_lakeformation_permissions` block in `lake_formation.tf` and run `make tf-apply ENV=<env>`.
+
+### Macie PII scan
+
+Amazon Macie runs a scheduled classification job on the 1st of every month targeting the `comtrade/` prefix of the data lake bucket. Findings are exported (KMS-encrypted) to a dedicated `<prefix>-macie-findings` bucket with a 365-day lifecycle.
+
+To review findings: AWS Console → **Amazon Macie → Findings**, or query the findings export bucket with Athena.
+
+A `NOOP` filter is configured for low-severity findings. Change the filter action to `ARCHIVE` in `terraform/macie.tf` to auto-suppress them.
 
 ### Data lineage (Marquez)
 

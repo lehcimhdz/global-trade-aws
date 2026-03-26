@@ -110,6 +110,13 @@ docker compose exec airflow-webserver airflow variables set COMTRADE_S3_BUCKET m
 |----------|---------|-------------|
 | `COMTRADE_WRITE_PARQUET` | `false` | Set to `"true"` to enable the `convert_to_parquet` task in every DAG. Requires `pandas` and `pyarrow`. |
 
+### dbt (silver layer)
+
+| Variable | Default | Description |
+|----------|---------|-------------|
+| `COMTRADE_DBT_DIR` | `/opt/airflow/dbt` | Absolute path to the dbt project inside the Airflow container. Change if mounting the dbt project at a different path. |
+| `COMTRADE_DBT_TARGET` | `prod` | dbt target profile to use. `prod` uses the Athena `comtrade` workgroup; `dev` uses the `primary` workgroup. |
+
 ### AWS (can also be set via `.env`)
 
 Variables `AWS_ACCESS_KEY_ID`, `AWS_SECRET_ACCESS_KEY`, and `AWS_DEFAULT_REGION` are read by `s3_writer.py` if present as Airflow Variables. The `.env` values are also available as container environment variables, so setting them in `.env` is sufficient — the Variables in `airflow_variables.json` can be left empty.
