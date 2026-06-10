@@ -2,7 +2,7 @@
 
 > Production-grade ELT data platform that ingests international trade data from the [UN Comtrade public API](https://comtradeapi.un.org), lands it in an Apache Iceberg data lake on AWS S3, transforms it into queryable silver tables via dbt + Amazon Athena, and exposes it through a FastAPI trade API and Amazon QuickSight dashboards — all fully orchestrated by Apache Airflow and provisioned with Terraform.
 
-[![CI](https://github.com/your-org/global-trade-aws/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/global-trade-aws/actions/workflows/ci.yml)
+[![CI](https://github.com/lehcimhdz/global-trade-aws/actions/workflows/ci.yml/badge.svg)](https://github.com/lehcimhdz/global-trade-aws/actions/workflows/ci.yml)
 ![Python](https://img.shields.io/badge/python-3.10%20|%203.11-blue)
 ![Airflow](https://img.shields.io/badge/airflow-2.9.3-017CEE?logo=apache-airflow)
 ![Terraform](https://img.shields.io/badge/terraform-%E2%89%A51.7-844FBA?logo=terraform)
@@ -31,6 +31,8 @@
 ---
 
 ## Overview
+
+> **Project status — portfolio showcase.** This repository is a fully-realized reference implementation. CI runs the full test and Terraform validation matrix on every push, but the infrastructure is intentionally not running against a live AWS account by default. The optional MWAA/QuickSight/Lambda components are gated behind Terraform variables so the stack can be brought up or torn down on demand without incurring standing AWS costs (estimated at ~$300/month minimum once MWAA is enabled).
 
 This project implements a four-layer ELT data platform on AWS:
 
@@ -322,7 +324,7 @@ global-trade-aws/
 ### 1. Clone and configure
 
 ```bash
-git clone https://github.com/your-org/global-trade-aws.git
+git clone https://github.com/lehcimhdz/global-trade-aws.git
 cd global-trade-aws
 
 cp .env.example .env
