@@ -200,7 +200,7 @@ s3://<COMTRADE_S3_BUCKET>/
 | `comtrade_dbt` | Monthly | 5 | Silver layer — dbt deps → freshness → staging → silver → test |
 | `comtrade_backfill` | Manual (`schedule=None`) | 2 | Historical backfill — supports `preview`, `previewTariffline`, `getMBS` |
 
-All DAGs share: `retries=1`, `retry_delay=10 min`, `catchup=False`, `on_failure_callback` on every task (Slack), `sla_miss_callback` on the DAG (Slack).
+All DAGs share: `catchup=False`, `on_failure_callback` on every task (Slack), `sla_miss_callback` on the DAG (Slack). Ingestion DAGs use `retries=2`, `retry_delay=5 min` (more aggressive — the public Comtrade API has periodic 5xx blips). `comtrade_dbt` and `comtrade_backfill` use `retries=1`, `retry_delay=10 min`.
 
 ---
 
