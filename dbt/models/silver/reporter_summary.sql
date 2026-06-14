@@ -8,7 +8,19 @@
   high-level country comparisons without scanning the full trade_flows table.
 
   Partitioned by `period` for efficient time-range queries.
+
+  Materialization: incremental + merge on (period, freq_code, reporter_code).
+  Incremental runs re-aggregate any period >= max(period) already loaded,
+  which captures late-arriving data without rescanning historical periods.
+  Full refresh is triggered with `dbt run --full-refresh --select silver`.
 */
+
+{{ config(
+    materialized='incremental',
+    incremental_strategy='merge',
+    unique_key=['period', 'freq_code', 'reporter_code'],
+    on_schema_change='fail'
+) }}
 
 with flows as (
 
@@ -26,6 +38,10 @@ with flows as (
     from {{ ref('stg_preview') }}
     where trade_value_usd is not null
       and trade_value_usd >= 0
+
+    {% if is_incremental() %}
+      and period >= (select coalesce(max(period), '0000') from {{ this }})
+    {% endif %}
 
 ),
 

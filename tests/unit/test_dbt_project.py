@@ -299,6 +299,65 @@ class TestSilverModels:
         assert "period" in cols_with_not_null
 
 
+# ── Silver incremental configuration ─────────────────────────────────────────
+
+
+class TestSilverIncrementalConfig:
+    """Both silver models materialize as incremental Iceberg tables with merge."""
+
+    def _silver_sql(self, name: str) -> str:
+        return (MODELS_DIR / "silver" / f"{name}.sql").read_text()
+
+    @pytest.mark.parametrize("model", ["trade_flows", "reporter_summary"])
+    def test_materialized_incremental(self, model):
+        sql = self._silver_sql(model)
+        assert "materialized='incremental'" in sql
+
+    @pytest.mark.parametrize("model", ["trade_flows", "reporter_summary"])
+    def test_incremental_strategy_is_merge(self, model):
+        sql = self._silver_sql(model)
+        assert "incremental_strategy='merge'" in sql
+
+    @pytest.mark.parametrize("model", ["trade_flows", "reporter_summary"])
+    def test_unique_key_present(self, model):
+        sql = self._silver_sql(model)
+        assert "unique_key=" in sql
+
+    @pytest.mark.parametrize("model", ["trade_flows", "reporter_summary"])
+    def test_on_schema_change_fail(self, model):
+        sql = self._silver_sql(model)
+        assert "on_schema_change='fail'" in sql
+
+    @pytest.mark.parametrize("model", ["trade_flows", "reporter_summary"])
+    def test_is_incremental_guard_present(self, model):
+        sql = self._silver_sql(model)
+        assert "is_incremental()" in sql
+
+    @pytest.mark.parametrize("model", ["trade_flows", "reporter_summary"])
+    def test_incremental_filter_reads_max_period_from_this(self, model):
+        sql = self._silver_sql(model)
+        assert "max(period)" in sql
+        assert "from {{ this }}" in sql
+
+    def test_reporter_summary_unique_key_natural_grain(self):
+        sql = self._silver_sql("reporter_summary")
+        for key in ("'period'", "'freq_code'", "'reporter_code'"):
+            assert key in sql
+
+    def test_trade_flows_unique_key_natural_grain(self):
+        sql = self._silver_sql("trade_flows")
+        for key in (
+            "'period'",
+            "'freq_code'",
+            "'type_code'",
+            "'reporter_code'",
+            "'partner_code'",
+            "'commodity_code'",
+            "'flow_code'",
+        ):
+            assert key in sql
+
+
 # ── Schema coverage: every model file has a YAML entry ────────────────────────
 
 
