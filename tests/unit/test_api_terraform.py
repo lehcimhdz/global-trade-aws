@@ -192,6 +192,36 @@ class TestFunctionUrl:
     def test_cors_allows_get(self):
         assert '"GET"' in self._block()
 
+    def test_auth_type_from_variable(self):
+        assert "authorization_type = var.api_function_url_auth_type" in self._block()
+
+    def test_cors_origins_from_variable(self):
+        assert "var.api_function_url_allowed_origins" in self._block()
+
+    def test_auth_type_variable_defined(self):
+        assert 'variable "api_function_url_auth_type"' in _VARS
+
+    def test_auth_type_defaults_to_none(self):
+        start = _VARS.index('variable "api_function_url_auth_type"')
+        end = _VARS.index("\n}", start)
+        block = _VARS[start:end]
+        assert 'default     = "NONE"' in block
+
+    def test_auth_type_validation_restricts_to_known_values(self):
+        start = _VARS.index('variable "api_function_url_auth_type"')
+        end = _VARS.index("\n}", start)
+        block = _VARS[start:end]
+        assert '["NONE", "AWS_IAM"]' in block
+
+    def test_allowed_origins_variable_defined(self):
+        assert 'variable "api_function_url_allowed_origins"' in _VARS
+
+    def test_allowed_origins_defaults_to_wildcard(self):
+        start = _VARS.index('variable "api_function_url_allowed_origins"')
+        end = _VARS.index("\n}", start)
+        block = _VARS[start:end]
+        assert '["*"]' in block
+
 
 # ── Outputs ───────────────────────────────────────────────────────────────────
 

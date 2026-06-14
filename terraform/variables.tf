@@ -114,3 +114,19 @@ variable "api_lambda_layer_arn" {
   description = "ARN of a Lambda layer containing FastAPI and Mangum dependencies. Leave empty to bundle dependencies in the deployment package."
   default     = ""
 }
+
+variable "api_function_url_auth_type" {
+  type        = string
+  description = "Authorization type for the Lambda Function URL. NONE = publicly reachable (default, for demo). AWS_IAM = requires SigV4-signed requests."
+  default     = "NONE"
+  validation {
+    condition     = contains(["NONE", "AWS_IAM"], var.api_function_url_auth_type)
+    error_message = "api_function_url_auth_type must be either NONE or AWS_IAM."
+  }
+}
+
+variable "api_function_url_allowed_origins" {
+  type        = list(string)
+  description = "List of allowed CORS origins for the Function URL. Use [\"*\"] for fully open (default)."
+  default     = ["*"]
+}

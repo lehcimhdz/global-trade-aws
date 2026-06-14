@@ -144,21 +144,23 @@ resource "aws_lambda_function" "api" {
   tags = local.tags
 }
 
-# ── Function URL (public, no auth) ────────────────────────────────────────────
-# For production, change authorization_type to "AWS_IAM" and sign requests
-# with SigV4, or front the function with API Gateway + Cognito.
+# ── Function URL ──────────────────────────────────────────────────────────────
+#
+# Defaults to authorization_type = NONE (publicly reachable) to keep the demo
+# friction-free. Set var.api_function_url_auth_type = "AWS_IAM" in production
+# to require SigV4-signed requests, and tighten allowed_origins.
 
 resource "aws_lambda_function_url" "api" {
   count = var.enable_api ? 1 : 0
 
   function_name      = aws_lambda_function.api[0].function_name
-  authorization_type = "NONE"
+  authorization_type = var.api_function_url_auth_type
 
   cors {
     allow_credentials = false
-    allow_origins     = ["*"]
+    allow_origins     = var.api_function_url_allowed_origins
     allow_methods     = ["GET"]
-    allow_headers     = ["Content-Type"]
+    allow_headers     = ["Content-Type", "Authorization"]
     max_age           = 300
   }
 }
