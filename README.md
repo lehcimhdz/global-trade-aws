@@ -60,7 +60,7 @@ This project implements a four-layer ELT data platform on AWS:
 | Security | Lake Formation column-level access; Amazon Macie monthly PII scan |
 | IaC | Terraform — 16 `.tf` files covering all AWS resources |
 | CI | GitHub Actions — lint → unit tests → full tests → terraform validate |
-| Tests | 633 unit tests · 3 skipped · zero Airflow mocks for business logic |
+| Tests | 667 unit tests · 37 skipped (DAG tests skipped without Airflow) · zero Airflow mocks for business logic |
 
 ---
 
@@ -250,7 +250,7 @@ global-trade-aws/
 │       └── schema.py                Schema drift detection + S3 baseline tracking
 │
 ├── tests/
-│   ├── unit/                        633 tests — no Airflow required for business logic
+│   ├── unit/                        667 tests — no Airflow required for business logic
 │   │   ├── test_client.py
 │   │   ├── test_s3_writer.py
 │   │   ├── test_dag_factory.py
@@ -563,7 +563,7 @@ If the variable is unset, callbacks log a warning and return silently — local 
 
 ```
 tests/
-├── unit/          633 tests — no Airflow install required for business logic
+├── unit/          667 tests — no Airflow install required for business logic
 │   ├── test_client.py               HTTP client: URL construction, retry, rate-limit
 │   ├── test_s3_writer.py            S3 key builder + upload helpers (moto)
 │   ├── test_dag_factory.py          extract / validate / parquet task logic
@@ -603,7 +603,7 @@ flowchart LR
 
     subgraph CI ["GitHub Actions — ci.yml"]
         L["lint\nblack · isort · flake8\nmypy · detect-secrets"]
-        U["unit-tests\npython 3.11\n633 tests · ~5 s"]
+        U["unit-tests\npython 3.11\n667 tests · ~5 s"]
         F["full-tests\nmatrix: py3.10 + py3.11\n+ dag integrity + integration"]
         T["terraform-validate\ninit -backend=false\n+ validate"]
         G(["ci-pass\n(required gate)"])

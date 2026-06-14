@@ -92,12 +92,16 @@ Key transformations in `stg_preview`:
 
 ### Silver (`+materialized: table`, `+table_type: iceberg`)
 
-Iceberg tables partitioned by `period`, stored in `s3://<bucket>/dbt/silver/`.
+Iceberg tables partitioned by `period`, stored in `s3://<bucket>/dbt/silver/`. Both shipped silver models override the project default to **`incremental` + `merge`** on their natural grain so monthly refreshes only re-aggregate the latest period (capturing late-arriving rows) instead of rescanning all history.
 
 | Model | Input | Description |
 |-------|-------|-------------|
-| `trade_flows` | `stg_preview` | Aggregated bilateral flows — one row per (period, reporter, partner, commodity, flow). Deduplicates partial loads via `SUM`. |
-| `reporter_summary` | `stg_preview` | Country-level roll-up — exports, imports, trade balance, commodity count, partner count per reporter per period. |
+| `trade_flows` | `stg_preview` | Aggregated bilateral flows — one row per (period, reporter, partner, commodity, flow). Deduplicates partial loads via `SUM`. Merge key = (period, freq_code, type_code, reporter_code, partner_code, commodity_code, flow_code). |
+| `reporter_summary` | `stg_preview` | Country-level roll-up — exports, imports, trade balance, commodity count, partner count per reporter per period. Merge key = (period, freq_code, reporter_code). |
+
+The incremental guard is `period >= (select coalesce(max(period), '0000') from {{ this }})`, so the latest period is always re-aggregated. Use `dbt run --full-refresh --select silver` to rebuild from scratch.
+
+Weekly housekeeping is handled by the `comtrade_iceberg_maintenance` DAG: `OPTIMIZE` (bin-pack) + `VACUUM` on every bronze and silver Iceberg table, scheduled for Sunday 04:00 UTC.
 
 ---
 

@@ -6,8 +6,8 @@ The test suite is split into three tiers:
 
 | Tier | Location | Airflow required | Count |
 |------|----------|-----------------|-------|
-| **Unit** | `tests/unit/` | Only for DAG factory / callbacks / backfill | 633 pass · 3 skip |
-| **DAG integrity** | `tests/dag_integrity/` | Yes | All 10 DAGs (8 ingestion + `comtrade_dbt` + `comtrade_backfill`) |
+| **Unit** | `tests/unit/` | Only for DAG factory / callbacks / backfill / iceberg-maintenance | 667 pass · 37 skip (skips are DAG/Airflow-gated) |
+| **DAG integrity** | `tests/dag_integrity/` | Yes | All 11 DAGs (8 ingestion + `comtrade_dbt` + `comtrade_backfill` + `comtrade_iceberg_maintenance`) |
 | **Integration smoke** | `tests/integration/` | Yes | 32 tests — full bronze pipeline against moto S3 |
 
 Tests that depend on Airflow are automatically **skipped** (not failed) when `apache-airflow` is not installed. No business-logic module (`validator.py`, `client.py`, `metrics.py`, etc.) imports Airflow at module level.
