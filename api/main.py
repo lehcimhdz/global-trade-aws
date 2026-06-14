@@ -97,8 +97,10 @@ def list_reporters(
     Filtered to annual data (``freq_code = 'A'``) only.
     """
     conditions = ["freq_code = 'A'"]
+    params: list[str] = []
     if period:
-        conditions.append(f"period = '{_period(period)}'")
+        conditions.append("period = ?")
+        params.append(_period(period))
     where = "WHERE " + " AND ".join(conditions)
 
     sql = f"""
@@ -117,7 +119,7 @@ def list_reporters(
         ORDER BY total_trade_value_usd DESC
         LIMIT {limit}
     """
-    return _execute(sql)
+    return _execute(sql, params)
 
 
 @app.get("/v1/reporters/{reporter_iso}/summary", tags=["data"])
@@ -141,11 +143,11 @@ def reporter_summary(
             partner_count
         FROM comtrade_silver.reporter_summary
         WHERE freq_code = 'A'
-          AND reporter_iso = '{iso}'
+          AND reporter_iso = ?
         ORDER BY period DESC
         LIMIT {limit}
     """
-    rows = _execute(sql)
+    rows = _execute(sql, [iso])
     if not rows["data"]:
         raise HTTPException(
             status_code=404, detail=f"No data found for reporter_iso={iso!r}"
@@ -175,15 +177,19 @@ def trade_flows(
     keep response sizes manageable.
     """
     conditions = ["freq_code = 'A'"]
+    params: list[str] = []
     if reporter_iso:
-        conditions.append(f"reporter_iso = '{_iso(reporter_iso)}'")
+        conditions.append("reporter_iso = ?")
+        params.append(_iso(reporter_iso))
     if partner_iso:
-        conditions.append(f"partner_iso = '{_iso(partner_iso)}'")
+        conditions.append("partner_iso = ?")
+        params.append(_iso(partner_iso))
     if period:
-        conditions.append(f"period = '{_period(period)}'")
+        conditions.append("period = ?")
+        params.append(_period(period))
     if flow_code:
-        fc = flow_code.strip().upper()
-        conditions.append(f"flow_code = '{fc}'")
+        conditions.append("flow_code = ?")
+        params.append(flow_code.strip().upper())
 
     where = "WHERE " + " AND ".join(conditions)
     sql = f"""
@@ -203,16 +209,26 @@ def trade_flows(
         ORDER BY trade_value_usd DESC
         LIMIT {limit}
     """
-    return _execute(sql)
+    return _execute(sql, params)
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 
-def _execute(sql: str) -> dict[str, Any]:
-    """Run *sql* via Athena and wrap the result in a ``{"data": [...]}`` envelope."""
+def _execute(sql: str, parameters: list[str] | None = None) -> dict[str, Any]:
+    """Run *sql* via Athena and wrap the result in a ``{"data": [...]}`` envelope.
+
+    ``parameters`` are bound to ``?`` placeholders via Athena
+    ``ExecutionParameters`` — never interpolated into the SQL string.
+    """
     try:
-        rows = run_query(sql, _WORKGROUP, _OUTPUT_LOCATION, _REGION)
+        rows = run_query(
+            sql,
+            _WORKGROUP,
+            _OUTPUT_LOCATION,
+            _REGION,
+            parameters=parameters,
+        )
     except AthenaQueryError as exc:
         raise HTTPException(status_code=500, detail=str(exc)) from exc
     return {"data": rows}

@@ -23,15 +23,18 @@ def run_query(
     output_location: str,
     region: str,
     *,
+    parameters: list[str] | None = None,
     max_polls: int = 60,
 ) -> list[dict[str, Any]]:
     """Execute *sql* synchronously and return rows as a list of dicts.
 
     Args:
-        sql: SQL statement to execute.
+        sql: SQL statement to execute. May contain ``?`` placeholders for
+            positional parameters bound via Athena ``ExecutionParameters``.
         workgroup: Athena workgroup name.
         output_location: S3 URI for query results (e.g. ``s3://bucket/prefix/``).
         region: AWS region string.
+        parameters: Optional positional values bound to ``?`` placeholders in *sql*.
         max_polls: Maximum number of status polls before raising a timeout error.
 
     Returns:
@@ -42,11 +45,15 @@ def run_query(
     """
     client = boto3.client("athena", region_name=region)
 
-    response = client.start_query_execution(
-        QueryString=sql,
-        WorkGroup=workgroup,
-        ResultConfiguration={"OutputLocation": output_location},
-    )
+    start_kwargs: dict[str, Any] = {
+        "QueryString": sql,
+        "WorkGroup": workgroup,
+        "ResultConfiguration": {"OutputLocation": output_location},
+    }
+    if parameters:
+        start_kwargs["ExecutionParameters"] = parameters
+
+    response = client.start_query_execution(**start_kwargs)
     execution_id: str = response["QueryExecutionId"]
 
     # Poll for completion with capped exponential back-off.

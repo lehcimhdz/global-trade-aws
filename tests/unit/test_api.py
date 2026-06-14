@@ -112,7 +112,9 @@ class TestListReporters:
         with patch("api.main.run_query", mock):
             client.get("/v1/reporters?period=2022")
         sql: str = mock.call_args[0][0]
-        assert "period = '2022'" in sql
+        params = mock.call_args.kwargs["parameters"]
+        assert "period = ?" in sql
+        assert "2022" in params
 
     def test_freq_code_always_filtered_to_annual(self, client):
         mock = _mock_run([REPORTER_ROW])
@@ -181,7 +183,9 @@ class TestReporterSummary:
         with patch("api.main.run_query", mock):
             client.get("/v1/reporters/usa/summary")
         sql: str = mock.call_args[0][0]
-        assert "reporter_iso = 'USA'" in sql
+        params = mock.call_args.kwargs["parameters"]
+        assert "reporter_iso = ?" in sql
+        assert "USA" in params
 
     def test_orders_by_period_desc(self, client):
         mock = _mock_run([SUMMARY_ROW])
@@ -227,38 +231,48 @@ class TestTradeFlows:
         with patch("api.main.run_query", mock):
             client.get("/v1/trade-flows?reporter_iso=USA")
         sql: str = mock.call_args[0][0]
-        assert "reporter_iso = 'USA'" in sql
+        params = mock.call_args.kwargs["parameters"]
+        assert "reporter_iso = ?" in sql
+        assert "USA" in params
 
     def test_partner_iso_filter_in_sql(self, client):
         mock = _mock_run([FLOW_ROW])
         with patch("api.main.run_query", mock):
             client.get("/v1/trade-flows?partner_iso=CHN")
         sql: str = mock.call_args[0][0]
-        assert "partner_iso = 'CHN'" in sql
+        params = mock.call_args.kwargs["parameters"]
+        assert "partner_iso = ?" in sql
+        assert "CHN" in params
 
     def test_period_filter_in_sql(self, client):
         mock = _mock_run([FLOW_ROW])
         with patch("api.main.run_query", mock):
             client.get("/v1/trade-flows?period=2022")
         sql: str = mock.call_args[0][0]
-        assert "period = '2022'" in sql
+        params = mock.call_args.kwargs["parameters"]
+        assert "period = ?" in sql
+        assert "2022" in params
 
     def test_flow_code_filter_in_sql(self, client):
         mock = _mock_run([FLOW_ROW])
         with patch("api.main.run_query", mock):
             client.get("/v1/trade-flows?flow_code=M")
         sql: str = mock.call_args[0][0]
-        assert "flow_code = 'M'" in sql
+        params = mock.call_args.kwargs["parameters"]
+        assert "flow_code = ?" in sql
+        assert "M" in params
 
     def test_all_filters_combined(self, client):
         mock = _mock_run([FLOW_ROW])
         with patch("api.main.run_query", mock):
             client.get("/v1/trade-flows?reporter_iso=USA&partner_iso=CHN&period=2022&flow_code=M")
         sql: str = mock.call_args[0][0]
-        assert "reporter_iso = 'USA'" in sql
-        assert "partner_iso = 'CHN'" in sql
-        assert "period = '2022'" in sql
-        assert "flow_code = 'M'" in sql
+        params = mock.call_args.kwargs["parameters"]
+        assert "reporter_iso = ?" in sql
+        assert "partner_iso = ?" in sql
+        assert "period = ?" in sql
+        assert "flow_code = ?" in sql
+        assert params == ["USA", "CHN", "2022", "M"]
 
     def test_freq_code_always_annual(self, client):
         mock = _mock_run([FLOW_ROW])
@@ -418,6 +432,48 @@ class TestRunQuery:
             run_query("SELECT 1", "wg", "s3://my-bucket/results/", "us-east-1")
         call_kwargs = boto_client.start_query_execution.call_args[1]
         assert call_kwargs["ResultConfiguration"]["OutputLocation"] == "s3://my-bucket/results/"
+
+    def test_parameters_forwarded_as_execution_parameters(self):
+        boto_client = self._make_athena_client()
+        with (
+            patch("api.athena.boto3.client", return_value=boto_client),
+            patch("api.athena.time.sleep"),
+        ):
+            run_query(
+                "SELECT * FROM t WHERE a = ? AND b = ?",
+                "wg",
+                "s3://bucket/",
+                "us-east-1",
+                parameters=["USA", "2022"],
+            )
+        call_kwargs = boto_client.start_query_execution.call_args[1]
+        assert call_kwargs["ExecutionParameters"] == ["USA", "2022"]
+
+    def test_omits_execution_parameters_when_none(self):
+        boto_client = self._make_athena_client()
+        with (
+            patch("api.athena.boto3.client", return_value=boto_client),
+            patch("api.athena.time.sleep"),
+        ):
+            run_query("SELECT 1", "wg", "s3://bucket/", "us-east-1")
+        call_kwargs = boto_client.start_query_execution.call_args[1]
+        assert "ExecutionParameters" not in call_kwargs
+
+    def test_omits_execution_parameters_when_empty_list(self):
+        boto_client = self._make_athena_client()
+        with (
+            patch("api.athena.boto3.client", return_value=boto_client),
+            patch("api.athena.time.sleep"),
+        ):
+            run_query(
+                "SELECT 1",
+                "wg",
+                "s3://bucket/",
+                "us-east-1",
+                parameters=[],
+            )
+        call_kwargs = boto_client.start_query_execution.call_args[1]
+        assert "ExecutionParameters" not in call_kwargs
 
     def test_region_passed_to_boto_client(self):
         boto_client = self._make_athena_client()
