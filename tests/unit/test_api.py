@@ -5,9 +5,10 @@ All Athena calls are mocked — no AWS credentials or real infrastructure needed
 """
 from __future__ import annotations
 
+import asyncio
 import time
 from typing import Any
-from unittest.mock import MagicMock, call, patch
+from unittest.mock import AsyncMock, MagicMock, call, patch
 
 import pytest
 
@@ -64,10 +65,9 @@ FLOW_ROW: dict[str, Any] = {
 }
 
 
-def _mock_run(rows: list[dict]) -> MagicMock:
-    """Return a mock for api.athena.run_query that returns *rows*."""
-    m = MagicMock(return_value=rows)
-    return m
+def _mock_run(rows: list[dict]) -> AsyncMock:
+    """Return an AsyncMock for api.main.run_query that resolves to *rows*."""
+    return AsyncMock(return_value=rows)
 
 
 # ── Health ─────────────────────────────────────────────────────────────────────
@@ -88,7 +88,7 @@ class TestHealthEndpoint:
 
 class TestListReporters:
     def test_returns_200_with_data(self, client):
-        with patch("api.main.run_query", return_value=[REPORTER_ROW]):
+        with patch("api.main.run_query", new=AsyncMock(return_value=[REPORTER_ROW])):
             r = client.get("/v1/reporters")
         assert r.status_code == 200
         assert r.json()["data"] == [REPORTER_ROW]
@@ -131,7 +131,7 @@ class TestListReporters:
         assert "total_trade_value_usd DESC" in sql
 
     def test_empty_result_returns_empty_list(self, client):
-        with patch("api.main.run_query", return_value=[]):
+        with patch("api.main.run_query", new=AsyncMock(return_value=[])):
             r = client.get("/v1/reporters")
         assert r.status_code == 200
         assert r.json()["data"] == []
@@ -149,7 +149,7 @@ class TestListReporters:
         assert r.status_code == 422
 
     def test_athena_error_returns_500(self, client):
-        with patch("api.main.run_query", side_effect=AthenaQueryError("boom")):
+        with patch("api.main.run_query", new=AsyncMock(side_effect=AthenaQueryError("boom"))):
             r = client.get("/v1/reporters")
         assert r.status_code == 500
         assert "boom" in r.json()["detail"]
@@ -171,7 +171,7 @@ SUMMARY_ROW: dict[str, Any] = {
 
 class TestReporterSummary:
     def test_returns_200_with_rows(self, client):
-        with patch("api.main.run_query", return_value=[SUMMARY_ROW]):
+        with patch("api.main.run_query", new=AsyncMock(return_value=[SUMMARY_ROW])):
             r = client.get("/v1/reporters/USA/summary")
         assert r.status_code == 200
         body = r.json()
@@ -202,7 +202,7 @@ class TestReporterSummary:
         assert "LIMIT 3" in sql
 
     def test_unknown_reporter_returns_404(self, client):
-        with patch("api.main.run_query", return_value=[]):
+        with patch("api.main.run_query", new=AsyncMock(return_value=[])):
             r = client.get("/v1/reporters/ZZZ/summary")
         assert r.status_code == 404
 
@@ -211,7 +211,7 @@ class TestReporterSummary:
         assert r.status_code == 422
 
     def test_athena_error_returns_500(self, client):
-        with patch("api.main.run_query", side_effect=AthenaQueryError("athena down")):
+        with patch("api.main.run_query", new=AsyncMock(side_effect=AthenaQueryError("athena down"))):
             r = client.get("/v1/reporters/USA/summary")
         assert r.status_code == 500
 
@@ -221,7 +221,7 @@ class TestReporterSummary:
 
 class TestTradeFlows:
     def test_returns_200_with_data(self, client):
-        with patch("api.main.run_query", return_value=[FLOW_ROW]):
+        with patch("api.main.run_query", new=AsyncMock(return_value=[FLOW_ROW])):
             r = client.get("/v1/trade-flows?reporter_iso=USA")
         assert r.status_code == 200
         assert r.json()["data"] == [FLOW_ROW]
@@ -303,7 +303,7 @@ class TestTradeFlows:
         assert "LIMIT 500" in sql
 
     def test_empty_result_returns_empty_list(self, client):
-        with patch("api.main.run_query", return_value=[]):
+        with patch("api.main.run_query", new=AsyncMock(return_value=[])):
             r = client.get("/v1/trade-flows")
         assert r.status_code == 200
         assert r.json()["data"] == []
@@ -321,7 +321,7 @@ class TestTradeFlows:
         assert r.status_code == 422
 
     def test_athena_error_returns_500(self, client):
-        with patch("api.main.run_query", side_effect=AthenaQueryError("fail")):
+        with patch("api.main.run_query", new=AsyncMock(side_effect=AthenaQueryError("fail"))):
             r = client.get("/v1/trade-flows")
         assert r.status_code == 500
 
@@ -330,7 +330,11 @@ class TestTradeFlows:
 
 
 class TestRunQuery:
-    """Tests for api.athena.run_query — mocks boto3 entirely."""
+    """Tests for api.athena.run_query — mocks boto3 entirely.
+
+    run_query is async; each test drives it with asyncio.run and patches
+    api.athena.asyncio.sleep so back-off polling resolves instantly.
+    """
 
     def _make_athena_client(
         self,
@@ -361,23 +365,27 @@ class TestRunQuery:
         client.get_paginator.return_value = paginator
         return client
 
+    @staticmethod
+    def _run(*args, **kwargs):
+        """Synchronously drive the async run_query for test ergonomics."""
+        return asyncio.run(run_query(*args, **kwargs))
+
     def test_returns_list_of_dicts(self):
         boto_client = self._make_athena_client()
         with (
             patch("api.athena.boto3.client", return_value=boto_client),
-            patch("api.athena.time.sleep"),
+            patch("api.athena.asyncio.sleep", new=AsyncMock()),
         ):
-            result = run_query("SELECT 1", "wg", "s3://bucket/", "us-east-1")
+            result = self._run("SELECT 1", "wg", "s3://bucket/", "us-east-1")
         assert result == [{"col_a": "val1", "col_b": "val2"}]
 
     def test_header_row_stripped(self):
         boto_client = self._make_athena_client()
         with (
             patch("api.athena.boto3.client", return_value=boto_client),
-            patch("api.athena.time.sleep"),
+            patch("api.athena.asyncio.sleep", new=AsyncMock()),
         ):
-            result = run_query("SELECT 1", "wg", "s3://bucket/", "us-east-1")
-        # Header row ("col_a", "col_b") must not appear as a data row.
+            result = self._run("SELECT 1", "wg", "s3://bucket/", "us-east-1")
         assert not any(
             v in ("col_a", "col_b") for row in result for v in row.values()
         )
@@ -386,19 +394,19 @@ class TestRunQuery:
         boto_client = self._make_athena_client(final_state="FAILED")
         with (
             patch("api.athena.boto3.client", return_value=boto_client),
-            patch("api.athena.time.sleep"),
+            patch("api.athena.asyncio.sleep", new=AsyncMock()),
             pytest.raises(AthenaQueryError, match="FAILED"),
         ):
-            run_query("SELECT 1", "wg", "s3://bucket/", "us-east-1")
+            self._run("SELECT 1", "wg", "s3://bucket/", "us-east-1")
 
     def test_cancelled_query_raises_error(self):
         boto_client = self._make_athena_client(final_state="CANCELLED")
         with (
             patch("api.athena.boto3.client", return_value=boto_client),
-            patch("api.athena.time.sleep"),
+            patch("api.athena.asyncio.sleep", new=AsyncMock()),
             pytest.raises(AthenaQueryError, match="CANCELLED"),
         ):
-            run_query("SELECT 1", "wg", "s3://bucket/", "us-east-1")
+            self._run("SELECT 1", "wg", "s3://bucket/", "us-east-1")
 
     def test_timeout_raises_error(self):
         client_mock = MagicMock()
@@ -408,18 +416,18 @@ class TestRunQuery:
         }
         with (
             patch("api.athena.boto3.client", return_value=client_mock),
-            patch("api.athena.time.sleep"),
+            patch("api.athena.asyncio.sleep", new=AsyncMock()),
             pytest.raises(AthenaQueryError, match="timed out"),
         ):
-            run_query("SELECT 1", "wg", "s3://bucket/", "us-east-1", max_polls=2)
+            self._run("SELECT 1", "wg", "s3://bucket/", "us-east-1", max_polls=2)
 
     def test_passes_workgroup_to_start_execution(self):
         boto_client = self._make_athena_client()
         with (
             patch("api.athena.boto3.client", return_value=boto_client),
-            patch("api.athena.time.sleep"),
+            patch("api.athena.asyncio.sleep", new=AsyncMock()),
         ):
-            run_query("SELECT 1", "my-wg", "s3://bucket/", "us-east-1")
+            self._run("SELECT 1", "my-wg", "s3://bucket/", "us-east-1")
         call_kwargs = boto_client.start_query_execution.call_args[1]
         assert call_kwargs["WorkGroup"] == "my-wg"
 
@@ -427,9 +435,9 @@ class TestRunQuery:
         boto_client = self._make_athena_client()
         with (
             patch("api.athena.boto3.client", return_value=boto_client),
-            patch("api.athena.time.sleep"),
+            patch("api.athena.asyncio.sleep", new=AsyncMock()),
         ):
-            run_query("SELECT 1", "wg", "s3://my-bucket/results/", "us-east-1")
+            self._run("SELECT 1", "wg", "s3://my-bucket/results/", "us-east-1")
         call_kwargs = boto_client.start_query_execution.call_args[1]
         assert call_kwargs["ResultConfiguration"]["OutputLocation"] == "s3://my-bucket/results/"
 
@@ -437,9 +445,9 @@ class TestRunQuery:
         boto_client = self._make_athena_client()
         with (
             patch("api.athena.boto3.client", return_value=boto_client),
-            patch("api.athena.time.sleep"),
+            patch("api.athena.asyncio.sleep", new=AsyncMock()),
         ):
-            run_query(
+            self._run(
                 "SELECT * FROM t WHERE a = ? AND b = ?",
                 "wg",
                 "s3://bucket/",
@@ -453,9 +461,9 @@ class TestRunQuery:
         boto_client = self._make_athena_client()
         with (
             patch("api.athena.boto3.client", return_value=boto_client),
-            patch("api.athena.time.sleep"),
+            patch("api.athena.asyncio.sleep", new=AsyncMock()),
         ):
-            run_query("SELECT 1", "wg", "s3://bucket/", "us-east-1")
+            self._run("SELECT 1", "wg", "s3://bucket/", "us-east-1")
         call_kwargs = boto_client.start_query_execution.call_args[1]
         assert "ExecutionParameters" not in call_kwargs
 
@@ -463,9 +471,9 @@ class TestRunQuery:
         boto_client = self._make_athena_client()
         with (
             patch("api.athena.boto3.client", return_value=boto_client),
-            patch("api.athena.time.sleep"),
+            patch("api.athena.asyncio.sleep", new=AsyncMock()),
         ):
-            run_query(
+            self._run(
                 "SELECT 1",
                 "wg",
                 "s3://bucket/",
@@ -479,9 +487,9 @@ class TestRunQuery:
         boto_client = self._make_athena_client()
         with (
             patch("api.athena.boto3.client", return_value=boto_client) as boto_mock,
-            patch("api.athena.time.sleep"),
+            patch("api.athena.asyncio.sleep", new=AsyncMock()),
         ):
-            run_query("SELECT 1", "wg", "s3://bucket/", "eu-west-1")
+            self._run("SELECT 1", "wg", "s3://bucket/", "eu-west-1")
         boto_mock.assert_called_once_with("athena", region_name="eu-west-1")
 
     def test_empty_result_returns_empty_list(self):
@@ -492,9 +500,9 @@ class TestRunQuery:
         )
         with (
             patch("api.athena.boto3.client", return_value=boto_client),
-            patch("api.athena.time.sleep"),
+            patch("api.athena.asyncio.sleep", new=AsyncMock()),
         ):
-            result = run_query("SELECT 1", "wg", "s3://bucket/", "us-east-1")
+            result = self._run("SELECT 1", "wg", "s3://bucket/", "us-east-1")
         assert result == []
 
     def test_null_cell_values_become_none(self):
@@ -506,7 +514,7 @@ class TestRunQuery:
         )
         with (
             patch("api.athena.boto3.client", return_value=boto_client),
-            patch("api.athena.time.sleep"),
+            patch("api.athena.asyncio.sleep", new=AsyncMock()),
         ):
-            result = run_query("SELECT 1", "wg", "s3://bucket/", "us-east-1")
+            result = self._run("SELECT 1", "wg", "s3://bucket/", "us-east-1")
         assert result == [{"col_a": None}]

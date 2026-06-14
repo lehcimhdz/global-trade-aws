@@ -4,10 +4,15 @@ Athena query runner for the trade API.
 Starts a query execution, polls until complete, and returns the result rows as
 a list of dicts keyed by column name.  The first page of the result set
 contains the column header row which is stripped before returning.
+
+Polling is asynchronous so a single Lambda container running FastAPI can
+service other requests while waiting on Athena. boto3 itself is synchronous —
+we keep using it (no aioboto3 dep) and offload the blocking calls through
+asyncio.to_thread.
 """
 from __future__ import annotations
 
-import time
+import asyncio
 from typing import Any
 
 import boto3
@@ -17,7 +22,7 @@ class AthenaQueryError(Exception):
     """Raised when an Athena query fails or times out."""
 
 
-def run_query(
+async def run_query(
     sql: str,
     workgroup: str,
     output_location: str,
@@ -26,7 +31,7 @@ def run_query(
     parameters: list[str] | None = None,
     max_polls: int = 60,
 ) -> list[dict[str, Any]]:
-    """Execute *sql* synchronously and return rows as a list of dicts.
+    """Execute *sql* and return rows as a list of dicts.
 
     Args:
         sql: SQL statement to execute. May contain ``?`` placeholders for
@@ -53,12 +58,14 @@ def run_query(
     if parameters:
         start_kwargs["ExecutionParameters"] = parameters
 
-    response = client.start_query_execution(**start_kwargs)
+    response = await asyncio.to_thread(client.start_query_execution, **start_kwargs)
     execution_id: str = response["QueryExecutionId"]
 
     # Poll for completion with capped exponential back-off.
     for attempt in range(max_polls):
-        status_resp = client.get_query_execution(QueryExecutionId=execution_id)
+        status_resp = await asyncio.to_thread(
+            client.get_query_execution, QueryExecutionId=execution_id
+        )
         state: str = status_resp["QueryExecution"]["Status"]["State"]
 
         if state == "SUCCEEDED":
@@ -69,25 +76,26 @@ def run_query(
             )
             raise AthenaQueryError(f"Athena query {state}: {reason}")
 
-        time.sleep(min(0.25 * (2**attempt), 5.0))
+        await asyncio.sleep(min(0.25 * (2**attempt), 5.0))
     else:
         raise AthenaQueryError(
             f"Athena query timed out after {max_polls} polls (execution_id={execution_id})"
         )
 
-    # Collect all result pages.
-    rows: list[dict[str, Any]] = []
-    columns: list[str] | None = None
-    paginator = client.get_paginator("get_query_results")
+    # Collect all result pages. Paginator iteration is synchronous; offload it.
+    def _collect_rows() -> list[dict[str, Any]]:
+        rows: list[dict[str, Any]] = []
+        columns: list[str] | None = None
+        paginator = client.get_paginator("get_query_results")
+        for page in paginator.paginate(QueryExecutionId=execution_id):
+            page_rows = page["ResultSet"]["Rows"]
+            if columns is None:
+                # First row of the first page is always the column-header row.
+                columns = [col.get("VarCharValue", "") for col in page_rows[0]["Data"]]
+                page_rows = page_rows[1:]
+            for raw_row in page_rows:
+                values = [cell.get("VarCharValue") for cell in raw_row["Data"]]
+                rows.append(dict(zip(columns, values)))
+        return rows
 
-    for page in paginator.paginate(QueryExecutionId=execution_id):
-        page_rows = page["ResultSet"]["Rows"]
-        if columns is None:
-            # First row of the first page is always the column-header row.
-            columns = [col.get("VarCharValue", "") for col in page_rows[0]["Data"]]
-            page_rows = page_rows[1:]
-        for raw_row in page_rows:
-            values = [cell.get("VarCharValue") for cell in raw_row["Data"]]
-            rows.append(dict(zip(columns, values)))
-
-    return rows
+    return await asyncio.to_thread(_collect_rows)

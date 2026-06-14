@@ -85,7 +85,7 @@ def health() -> dict[str, str]:
 
 
 @app.get("/v1/reporters", tags=["data"])
-def list_reporters(
+async def list_reporters(
     period: Annotated[
         Optional[str],
         Query(pattern=_PERIOD_PATTERN, description="Filter to a single year (e.g. 2022)"),
@@ -119,11 +119,11 @@ def list_reporters(
         ORDER BY total_trade_value_usd DESC
         LIMIT {limit}
     """
-    return _execute(sql, params)
+    return await _execute(sql, params)
 
 
 @app.get("/v1/reporters/{reporter_iso}/summary", tags=["data"])
-def reporter_summary(
+async def reporter_summary(
     reporter_iso: Annotated[str, Path(pattern=_ISO_PATTERN)],
     limit: Annotated[int, Query(ge=1, le=50)] = 10,
 ) -> dict[str, Any]:
@@ -147,7 +147,7 @@ def reporter_summary(
         ORDER BY period DESC
         LIMIT {limit}
     """
-    rows = _execute(sql, [iso])
+    rows = await _execute(sql, [iso])
     if not rows["data"]:
         raise HTTPException(
             status_code=404, detail=f"No data found for reporter_iso={iso!r}"
@@ -156,7 +156,7 @@ def reporter_summary(
 
 
 @app.get("/v1/trade-flows", tags=["data"])
-def trade_flows(
+async def trade_flows(
     reporter_iso: Annotated[
         Optional[str], Query(pattern=_ISO_PATTERN)
     ] = None,
@@ -209,20 +209,20 @@ def trade_flows(
         ORDER BY trade_value_usd DESC
         LIMIT {limit}
     """
-    return _execute(sql, params)
+    return await _execute(sql, params)
 
 
 # ── Internal helpers ──────────────────────────────────────────────────────────
 
 
-def _execute(sql: str, parameters: list[str] | None = None) -> dict[str, Any]:
+async def _execute(sql: str, parameters: list[str] | None = None) -> dict[str, Any]:
     """Run *sql* via Athena and wrap the result in a ``{"data": [...]}`` envelope.
 
     ``parameters`` are bound to ``?`` placeholders via Athena
     ``ExecutionParameters`` — never interpolated into the SQL string.
     """
     try:
-        rows = run_query(
+        rows = await run_query(
             sql,
             _WORKGROUP,
             _OUTPUT_LOCATION,
