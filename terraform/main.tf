@@ -26,8 +26,22 @@ provider "aws" {
   }
 }
 
+# Shared across macie.tf and quicksight.tf — declared once here to avoid
+# duplicate data source declarations.
+data "aws_caller_identity" "current" {}
+
 locals {
   common_tags = {
+    Project     = var.project_name
+    Environment = var.environment
+    ManagedBy   = "terraform"
+    Repository  = "global-trade-aws"
+  }
+
+  # Alias for resources that reference `local.tags` (most of the .tf files
+  # use this name for tagging individual resources beyond the provider's
+  # default_tags block).
+  tags = {
     Project     = var.project_name
     Environment = var.environment
     ManagedBy   = "terraform"

@@ -15,7 +15,7 @@
 # After apply, log into the QuickSight console and build analyses / dashboards
 # from the two published datasets.  See docs/operations.md for the step-by-step.
 
-data "aws_caller_identity" "current" {}
+# (`data "aws_caller_identity" "current"` is declared in main.tf and shared.)
 
 locals {
   qs_principal = "arn:aws:quicksight:${var.aws_region}:${data.aws_caller_identity.current.account_id}:user/default/${var.quicksight_username}"

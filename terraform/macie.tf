@@ -136,11 +136,8 @@ resource "aws_s3_bucket_policy" "macie_findings" {
   depends_on = [aws_s3_bucket_public_access_block.macie_findings]
 }
 
-# ── Current account id (needed for bucket policy condition) ───────────────────
-
-data "aws_caller_identity" "current" {}
-
 # ── Monthly classification job ────────────────────────────────────────────────
+# (`data "aws_caller_identity" "current"` is declared in main.tf and shared.)
 
 resource "aws_macie2_classification_job" "data_lake" {
   name       = "${local.name_prefix}-data-lake-pii-scan"
