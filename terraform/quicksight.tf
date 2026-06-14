@@ -281,3 +281,57 @@ resource "aws_quicksight_data_set" "trade_flows" {
 
   tags = local.tags
 }
+
+
+# ── SPICE refresh schedules ───────────────────────────────────────────────────
+#
+# Full SPICE refresh fires monthly on the 5th, several hours after the monthly
+# comtrade_dbt DAG repopulates the silver tables.
+
+resource "aws_quicksight_refresh_schedule" "reporter_summary" {
+  count = var.enable_quicksight ? 1 : 0
+
+  aws_account_id = data.aws_caller_identity.current.account_id
+  data_set_id    = aws_quicksight_data_set.reporter_summary[0].data_set_id
+  schedule_id    = "${local.name_prefix}-reporter-summary-monthly"
+
+  schedule {
+    refresh_type = "FULL_REFRESH"
+
+    schedule_frequency {
+      interval  = "MONTHLY"
+      time_of_the_day = "06:00"
+      timezone        = var.quicksight_refresh_timezone
+
+      refresh_on_day {
+        day_of_month = "5"
+      }
+    }
+
+    start_after_date_time = "2025-01-01T06:00:00"
+  }
+}
+
+resource "aws_quicksight_refresh_schedule" "trade_flows" {
+  count = var.enable_quicksight ? 1 : 0
+
+  aws_account_id = data.aws_caller_identity.current.account_id
+  data_set_id    = aws_quicksight_data_set.trade_flows[0].data_set_id
+  schedule_id    = "${local.name_prefix}-trade-flows-monthly"
+
+  schedule {
+    refresh_type = "FULL_REFRESH"
+
+    schedule_frequency {
+      interval  = "MONTHLY"
+      time_of_the_day = "06:00"
+      timezone        = var.quicksight_refresh_timezone
+
+      refresh_on_day {
+        day_of_month = "5"
+      }
+    }
+
+    start_after_date_time = "2025-01-01T06:00:00"
+  }
+}

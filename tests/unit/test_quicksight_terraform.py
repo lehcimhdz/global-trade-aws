@@ -316,3 +316,49 @@ class TestQuickSightOutputs:
         end = _OUTPUTS.index("\n}", start)
         block = _OUTPUTS[start:end]
         assert "var.aws_region" in block
+
+
+# ── Refresh schedules ─────────────────────────────────────────────────────────
+
+
+class TestRefreshSchedules:
+    @pytest.mark.parametrize("dataset", DATASETS)
+    def test_schedule_resource_defined(self, dataset):
+        assert f'resource "aws_quicksight_refresh_schedule" "{dataset}"' in _QS
+
+    @pytest.mark.parametrize("dataset", DATASETS)
+    def test_schedule_gated_on_enable_quicksight(self, dataset):
+        start = _QS.index(f'resource "aws_quicksight_refresh_schedule" "{dataset}"')
+        snippet = _QS[start : start + 200]
+        assert "var.enable_quicksight ? 1 : 0" in snippet
+
+    @pytest.mark.parametrize("dataset", DATASETS)
+    def test_schedule_references_dataset(self, dataset):
+        start = _QS.index(f'resource "aws_quicksight_refresh_schedule" "{dataset}"')
+        end = _QS.index("\n}\n", start)
+        block = _QS[start:end]
+        assert f"aws_quicksight_data_set.{dataset}[0].data_set_id" in block
+
+    @pytest.mark.parametrize("dataset", DATASETS)
+    def test_schedule_is_monthly_full_refresh(self, dataset):
+        start = _QS.index(f'resource "aws_quicksight_refresh_schedule" "{dataset}"')
+        end = _QS.index("\n}\n", start)
+        block = _QS[start:end]
+        assert 'refresh_type = "FULL_REFRESH"' in block
+        assert 'interval' in block and '"MONTHLY"' in block
+
+    @pytest.mark.parametrize("dataset", DATASETS)
+    def test_schedule_uses_timezone_variable(self, dataset):
+        start = _QS.index(f'resource "aws_quicksight_refresh_schedule" "{dataset}"')
+        end = _QS.index("\n}\n", start)
+        block = _QS[start:end]
+        assert "var.quicksight_refresh_timezone" in block
+
+    def test_timezone_variable_defined(self):
+        assert 'variable "quicksight_refresh_timezone"' in _VARS
+
+    def test_timezone_defaults_to_utc(self):
+        start = _VARS.index('variable "quicksight_refresh_timezone"')
+        end = _VARS.index("\n}", start)
+        block = _VARS[start:end]
+        assert 'default     = "UTC"' in block

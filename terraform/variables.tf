@@ -95,6 +95,12 @@ variable "quicksight_username" {
   default     = ""
 }
 
+variable "quicksight_refresh_timezone" {
+  type        = string
+  description = "IANA timezone used for the SPICE monthly refresh schedule."
+  default     = "UTC"
+}
+
 # ── Trade API ──────────────────────────────────────────────────────────────────
 
 variable "enable_api" {
