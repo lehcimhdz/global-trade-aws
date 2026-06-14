@@ -14,13 +14,17 @@
 # The function URL is emitted as the ``api_endpoint_url`` Terraform output.
 
 # ── Deployment package ────────────────────────────────────────────────────────
+#
+# The deployment artifact at ../build/api.zip is built out-of-band by
+# `make api-build`, which vendors FastAPI / Mangum into build/lambda_pkg/ and
+# zips them together with api/*.py. Terraform does NOT build the zip itself —
+# a previous `archive_file` data source bundled only api/*.py and silently
+# stripped the dependencies, producing a broken artifact.
+#
+# Run `make api-build` before `terraform apply -var=enable_api=true`.
 
-data "archive_file" "api" {
-  count       = var.enable_api ? 1 : 0
-  type        = "zip"
-  source_dir  = "${path.module}/../api"
-  output_path = "${path.module}/../build/api.zip"
-  excludes    = ["__pycache__", "*.pyc", "requirements.txt"]
+locals {
+  api_zip_path = "${path.module}/../build/api.zip"
 }
 
 # ── IAM execution role ────────────────────────────────────────────────────────
@@ -119,8 +123,8 @@ resource "aws_lambda_function" "api" {
 
   function_name    = "${local.name_prefix}-trade-api"
   description      = "Global Trade REST API — FastAPI on Lambda, queries Athena silver tables"
-  filename         = data.archive_file.api[0].output_path
-  source_code_hash = data.archive_file.api[0].output_base64sha256
+  filename         = local.api_zip_path
+  source_code_hash = filebase64sha256(local.api_zip_path)
   role             = aws_iam_role.api_lambda[0].arn
   handler          = "main.handler"
   runtime          = "python3.11"

@@ -151,24 +151,23 @@ class TestLambdaFunction:
     def test_uses_name_prefix(self):
         assert "local.name_prefix" in self._block()
 
-    def test_uses_data_archive_file(self):
-        assert "data.archive_file.api" in self._block()
+    def test_uses_prebuilt_zip(self):
+        block = self._block()
+        assert "local.api_zip_path" in block
+        assert "filebase64sha256(local.api_zip_path)" in block
 
 
-# ── Archive file ──────────────────────────────────────────────────────────────
+# ── Deployment package ────────────────────────────────────────────────────────
 
 
-class TestArchiveFile:
-    def test_archive_file_resource_defined(self):
-        assert 'data "archive_file" "api"' in _API
+class TestDeploymentPackage:
+    def test_no_archive_file_data_source(self):
+        # The archive_file data source was removed because it bundled api/*.py
+        # without the FastAPI/Mangum dependencies, clobbering make api-build.
+        assert 'data "archive_file" "api"' not in _API
 
-    def test_archive_type_is_zip(self):
-        assert 'type        = "zip"' in _API
-
-    def test_source_dir_points_to_api_directory(self):
-        assert "../api" in _API
-
-    def test_output_goes_to_build_directory(self):
+    def test_api_zip_path_local_defined(self):
+        assert "api_zip_path" in _API
         assert "../build/api.zip" in _API
 
 
